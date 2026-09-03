@@ -26,8 +26,11 @@ login, no tracking, and no backend of its own.
 
 ## Running it
 
-Open `index.html` through a local web server rather than double-clicking it,
-since the browser needs to fetch the data files:
+Github Page: https://jwakey.github.io/sv-tracker/
+
+Or through a local web server
+
+Open `index.html` 
 
 ```bash
 python3 -m http.server 8000
