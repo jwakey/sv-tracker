@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Authoritative list of which Iridium satellites are active mission satellites",
+    "and which are in-orbit spares, broken down by orbital plane.",
+    "",
+    "Numbers are Iridium vehicle numbers, i.e. the NNN in the CelesTrak name",
+    "'IRIDIUM NNN' -- not NORAD catalogue numbers.",
+    "",
+    "This file is the only thing that decides operational vs spare. A satellite",
+    "missing from it is treated as operational, so a newly launched one shows up",
+    "as a normal member of the constellation until you add it here.",
+    "data/satellite-overrides.json still wins over this file.",
+    "",
+    "Plane numbering follows this list, not orbital geometry."
+  ],
+  "planes": {
+    "1": {
+      "operational": [140, 142, 143, 144, 145, 146, 148, 149, 150, 153, 157],
+      "spares": [124, 174]
+    },
+    "2": {
+      "operational": [113, 116, 120, 130, 131, 134, 135, 137, 138, 141, 151],
+      "spares": [115, 177]
+    },
+    "3": {
+      "operational": [117, 118, 121, 123, 126, 167, 168, 171, 172, 173, 180],
+      "spares": [170, 175, 176]
+    },
+    "4": {
+      "operational": [100, 107, 119, 122, 125, 128, 129, 132, 133, 136, 139],
+      "spares": [169, 178, 179]
+    },
+    "5": {
+      "operational": [108, 154, 155, 156, 158, 159, 160, 163, 164, 165, 166],
+      "spares": [105, 181]
+    },
+    "6": {
+      "operational": [102, 103, 104, 106, 109, 110, 111, 112, 114, 147, 152],
+      "spares": [161, 162]
+    }
+  }
+}

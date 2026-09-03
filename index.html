@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iridium Constellation Display</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- Top bar: constellation summary, TLE age and refresh, 2D/3D toggle. -->
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <h1>SV Viewer</h1>
+  </div>
+
+  <div class="topbar-status">
+    <span id="constellation-summary" class="summary">loading&hellip;</span>
+    <span class="divider"></span>
+    <span id="tle-status" class="tle-status">Elements: &mdash;</span>
+    <button id="refresh-btn" class="ghost-btn" title="Fetch the latest elements from CelesTrak">Refresh</button>
+  </div>
+
+  <div class="view-toggle" role="group" aria-label="Map view">
+    <button id="view-2d" class="toggle-btn active" aria-pressed="true">2D Map</button>
+    <button id="view-3d" class="toggle-btn" aria-pressed="false">3D Globe</button>
+  </div>
+
+  <!-- Display and plane controls. In a dropdown so they are reachable from
+       either view without taking permanent sidebar space. -->
+  <div class="display-menu">
+    <button id="display-menu-btn" class="ghost-btn" aria-haspopup="true" aria-expanded="false" aria-controls="display-dropdown">Display &#9662;</button>
+    <section class="panel dropdown-panel" id="display-dropdown" hidden>
+      <h2>Display</h2>
+      <label class="check"><input type="checkbox" id="opt-operational" checked><span>Operational satellites</span></label>
+      <label class="check"><input type="checkbox" id="opt-spares" checked><span>In-orbit spares</span></label>
+      <label class="check"><input type="checkbox" id="opt-highlight-spares"><span>Highlight all spares</span></label>
+      <label class="check"><input type="checkbox" id="opt-footprints" checked><span>Coverage footprints</span></label>
+      <label class="check"><input type="checkbox" id="opt-satnames" checked><span>Satellite names</span></label>
+      <label class="check"><input type="checkbox" id="opt-planelinks" checked><span>Link satellites in plane</span></label>
+      <label class="check"><input type="checkbox" id="opt-vislines" checked><span>Spare visibility lines</span></label>
+      <label class="check"><input type="checkbox" id="opt-daynight" checked><span>Day/night shading</span></label>
+      <label class="field">
+        <span>Footprint elevation mask</span>
+        <div class="input-unit">
+          <input id="mask-input" type="number" min="0" max="30" step="0.1" value="8.2"
+                 inputmode="decimal" autocomplete="off">
+          <em>&deg;</em>
+        </div>
+      </label>
+      <label class="field">
+        <span>Footprint opacity <em id="footprint-opacity-readout">30%</em></span>
+        <input id="footprint-opacity" type="range" min="0" max="100" step="1" value="30">
+      </label>
+      <p class="hint">Footprint radius <em id="footprint-readout">&mdash;</em> at operational altitude. Ground-site
+        visibility uses each site&rsquo;s own mask from <code>ground-sites.json</code>.</p>
+
+      <div class="dropdown-subhead">Orbital planes</div>
+      <div id="plane-legend" class="legend"></div>
+    </section>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- Left control panel. Each <section> maps to one part of state.opts in
+       js/app.js, and is wired up by initUI() in js/ui.js. -->
+  <aside class="sidebar" id="sidebar">
+
+    <section class="panel">
+      <h2>Find a satellite</h2>
+      <input id="sat-search" class="search-input" type="search" autocomplete="off" spellcheck="false"
+             placeholder="Name, number or NORAD ID" aria-label="Search satellites">
+      <ul id="search-results" class="search-results" role="listbox"></ul>
+      <p class="hint search-hint">Press <kbd>/</kbd> to search, <kbd>&uarr;</kbd><kbd>&darr;</kbd> to move, <kbd>Enter</kbd> to select.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Time</h2>
+      <div class="clock">
+        <span class="clock-stack">
+          <span class="clock-primary"><span id="sim-time">&mdash;&mdash;:&mdash;&mdash;:&mdash;&mdash;</span><span class="clock-unit">UTC</span></span>
+          <span id="sim-date" class="clock-date">&mdash;</span>
+        </span>
+        <span id="time-offset" class="offset-tag">Live</span>
+      </div>
+      <div class="row">
+        <button id="play-btn" class="ghost-btn wide" aria-pressed="true">Pause</button>
+        <button id="now-btn" class="ghost-btn wide">Now</button>
+      </div>
+      <label class="field">
+        <span>Speed</span>
+        <select id="speed-select">
+          <option value="1" selected>1&times; real time</option>
+          <option value="10">10&times;</option>
+          <option value="60">60&times;</option>
+          <option value="600">600&times;</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Offset <em id="offset-readout">now</em></span>
+        <input id="time-slider" type="range" min="-1440" max="1440" step="1" value="0">
+      </label>
+      <div class="slider-scale"><span>&minus;24 h</span><span>now</span><span>+24 h</span></div>
+
+      <div class="field">
+        <span><label for="jump-input">Jump to</label> <em>UTC</em></span>
+        <div class="input-unit">
+          <input id="jump-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="YYYY-MM-DD HH:MM:SS" aria-describedby="jump-hint">
+          <button id="jump-btn" type="button" class="ghost-btn">Go</button>
+        </div>
+      </div>
+      <p id="jump-hint" class="hint">Or <em>HH:MM</em> alone for a time on the current UTC day.</p>
+    </section>
+
+  </aside>
+
+  <!-- Map stage. Both views are created on demand and stacked here; only the
+       active one is visible. See setView() in js/app.js. -->
+  <div class="stage">
+    <div id="map-2d" class="view-pane"></div>
+    <div id="map-3d" class="view-pane hidden"></div>
+    <div id="loading" class="loading-overlay"><span class="spinner"></span><span>Loading orbital elements&hellip;</span></div>
+  </div>
+
+  <!-- Right detail panel, filled by renderDetail() in js/ui.js for the
+       selected satellite or ground site. Hidden when nothing is selected. -->
+  <aside class="detail" id="detail-panel" hidden>
+    <button id="detail-close" class="close-btn" aria-label="Close">&times;</button>
+    <div id="detail-body"></div>
+  </aside>
+</main>
+
+<!-- Leaflet drives the 2D view, satellite.js does the SGP4 propagation.
+     Cesium is not here: js/view3d.js fetches it on demand the first time the
+     globe is opened. -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/satellite.js@5.0.0/dist/satellite.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

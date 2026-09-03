@@ -1,0 +1,10 @@
+{
+  "_comment": [
+    "Per-satellite corrections to the operational/spare classification.",
+    "Status normally comes from data/constellation-roster.json alone; entries",
+    "here override it for individual satellites.",
+    "Key = NORAD catalog number (as a string). Value = 'operational', 'spare' or 'hidden'.",
+    "Example: \"41917\": \"spare\""
+  ],
+  "overrides": {}
+}

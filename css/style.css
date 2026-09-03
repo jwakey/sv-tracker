@@ -1,0 +1,514 @@
+/* Iridium Constellation Display
+   Chrome is neutral graphite and stays out of the way: colour on screen means
+   data, not decoration. Sans for interface text, monospace only for values you
+   read digit by digit. No glows - the map is the bright thing here. */
+
+:root {
+  --bg: #16191d;
+  --bg-panel: #000000;
+  --bg-raised: #000000;
+  --bg-hover: #000000;
+  --bg-input: #000000;
+
+  /* Hairlines between rows stay quiet - a table of 3:1 rules reads as a grid.
+     Control edges do not: 3.4:1 on a panel, 3.9:1 on a field, so the boundary
+     of every input and button is visible without hunting for it. */
+  --border: #434e59;
+  --border-strong: #667382;
+
+  /* Measured against --bg-panel: 15:1, 8.6:1, 5.9:1. Nothing here goes below
+     4.5:1, the small print included. */
+  --text: #f2f4f6;
+  --text-dim: #b4bcc4;
+  --text-faint: #929ba4;
+
+  /* Interface accent. Deliberately not green or amber: those two carry meaning
+     on the map (plane, spare) and must not also mean "focused" or "active". */
+  --accent: #5b93c7;
+
+  /* Status colours for the CHROME only - panels, badges, the clock indicator.
+     Nothing on the map reads these: the satellites, footprints, plane rings
+     and tracks take their colour from PLANE_COLOR and SPARE_COLOR in
+     js/classify.js, and the map's own furniture from COLORS in js/view2d.js.
+
+     Kept in the same green and amber families as the map, so a green chip in a
+     panel and a green mark on the map mean the same thing. */
+  --ok: #35e88c;     /* "Operational" badge in the detail panel. 10.3:1 */
+  --live: #4dff9e;   /* "Live" clock indicator - the brightest chrome. 12.7:1 */
+  --warn: #d8a34d;   /* spares, stale elements, a scrubbed clock. 7.3:1 */
+
+  --ocean: #0e1215;
+
+  --radius: 3px;
+  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.55 var(--ui);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* One focus treatment everywhere, on keyboard focus only. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---------- top bar ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 44px;
+  padding: 0 14px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { display: flex; align-items: center; gap: 9px; }
+
+/* The title carries the app on its own; a marker beside it is decoration. */
+.brand-mark { display: none; }
+
+.topbar h1 {
+  font-size: 18px; font-weight: 600; margin: 0;
+  letter-spacing: 0.2px; color: var(--text);
+}
+
+.topbar-status {
+  display: flex; align-items: center; gap: 12px;
+  margin-left: auto;
+  font-size: 12px; color: var(--text-dim);
+}
+
+.divider { width: 1px; height: 16px; background: var(--border-strong); }
+.summary { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.tle-status { color: var(--text-faint); }
+.tle-status.stale { color: var(--warn); }
+
+/* Segmented control. The active half is a raised tone with an accent rule
+   under it, not a filled slab. */
+.view-toggle {
+  display: flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.toggle-btn {
+  background: transparent; border: 0; color: var(--text-dim);
+  padding: 6px 13px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.toggle-btn + .toggle-btn { border-left: 1px solid var(--border-strong); }
+.toggle-btn:hover { color: var(--text); background: var(--bg-raised); }
+.toggle-btn.active {
+  background: var(--bg-hover); color: var(--text); font-weight: 500;
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.ghost-btn {
+  background: var(--bg-raised); border: 1px solid var(--border-strong);
+  color: var(--text); padding: 5px 11px;
+  font: inherit; font-size: 12px; cursor: pointer;
+  border-radius: var(--radius);
+}
+.ghost-btn:hover { background: var(--bg-hover); border-color: #4a535e; }
+.ghost-btn:active { background: #1c2126; }
+.ghost-btn.wide { flex: 1; }
+
+/* ---------- display dropdown ---------- */
+
+.display-menu { position: relative; }
+
+.dropdown-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 284px;
+  max-height: calc(100vh - 70px);
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  padding: 12px 13px;
+  z-index: 1000;
+}
+
+.dropdown-subhead {
+  margin: 16px 0 9px; padding-top: 13px;
+  font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-dim);
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- layout ---------- */
+
+.layout { display: flex; height: calc(100% - 44px); }
+
+.sidebar {
+  width: 258px; flex: none; overflow-y: auto;
+  background: var(--bg-panel); border-right: 1px solid var(--border);
+}
+
+.panel { padding: 13px; border-bottom: 1px solid var(--border); }
+
+.panel h2 {
+  margin: 0 0 11px; font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-dim);
+}
+
+.stage { position: relative; flex: 1; min-width: 0; background: var(--ocean); }
+.view-pane { position: absolute; inset: 0; }
+.view-pane.hidden { display: none; }
+
+/* ---------- controls ---------- */
+
+/* The clock is the panel's primary readout: monospace so the digits hold their
+   columns as it counts, but no colour - it is a value, not a status.
+   The time carries the weight and the date sits under it, small: the date is
+   context you check once, the time is what gets read every few seconds. */
+.clock {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 8px; margin-bottom: 12px;
+}
+
+.clock-stack { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+.clock-primary {
+  display: flex; align-items: baseline; gap: 6px;
+  font-family: var(--mono); font-size: 21px; font-weight: 500;
+  line-height: 1.05; letter-spacing: 0.5px;
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+.clock-unit {
+  font-size: 11px; font-weight: 400; letter-spacing: 0.6px;
+  color: var(--text-dim); font-family: var(--mono);
+}
+.clock-date {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Live is a state worth seeing from across the room: green while the clock is
+   tracking real time, amber the moment it is scrubbed off it. Same green as
+   the operational badge, so "green means nominal" holds across the app. */
+.offset-tag {
+  font-size: 12px; font-weight: 500; color: var(--live);
+  border: 1px solid #22885a; background: rgba(77, 255, 158, 0.12);
+  border-radius: var(--radius);
+  padding: 3px 10px; margin-top: 4px; flex: none; font-family: var(--ui);
+}
+.offset-tag.shifted {
+  color: var(--warn); border-color: #7a5f2c; background: rgba(216, 163, 77, 0.1);
+}
+
+.row { display: flex; gap: 6px; margin-bottom: 11px; }
+
+.field { display: block; margin-bottom: 11px; }
+.field > span {
+  display: flex; justify-content: space-between;
+  font-size: 12px; color: var(--text-dim); margin-bottom: 5px;
+}
+.field em {
+  font-style: normal; color: var(--text);
+  font-family: var(--mono); font-size: 11.5px;
+}
+
+select, input[type="range"] { width: 100%; }
+
+select, input[type="number"], input[type="text"], .search-input {
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  padding: 6px 8px; font: inherit; font-size: 12.5px;
+}
+select { font-family: var(--ui); }
+input[type="number"], input[type="text"] { font-family: var(--mono); font-size: 12px; }
+select:focus, input:focus { outline: none; border-color: var(--accent); }
+input::placeholder { color: var(--text-faint); }
+
+/* Numeric field with the unit outside the box, clear of the browser's own
+   spinner. */
+.input-unit { display: flex; align-items: center; gap: 7px; }
+.input-unit input { flex: 1; min-width: 0; }
+.input-unit em { font-style: normal; color: var(--text-dim); font-size: 11.5px; }
+.input-unit .ghost-btn { flex: none; }
+
+/* The jump hint doubles as its error line, so a rejected entry explains itself
+   in place instead of shifting everything below it. */
+.hint.bad { color: var(--warn); }
+
+input[type="range"] { accent-color: var(--accent); height: 18px; }
+
+.slider-scale {
+  display: flex; justify-content: space-between;
+  font-size: 10.5px; color: var(--text-faint); margin-top: -4px;
+  font-family: var(--mono);
+}
+
+.check {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; padding: 5px; margin: 0 -5px; cursor: pointer;
+  color: var(--text); border-radius: 2px;
+}
+.check:hover { background: var(--bg-raised); }
+.check input { accent-color: var(--accent); width: 13px; height: 13px; }
+
+.hint { font-size: 11.5px; color: var(--text-dim); margin: 8px 0 0; line-height: 1.55; }
+.hint em { font-style: normal; color: var(--text); font-family: var(--mono); font-size: 11px; }
+
+code {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 2px; padding: 0 4px; color: var(--text-dim);
+}
+
+/* ---------- plane legend ---------- */
+
+.legend { display: flex; flex-direction: column; }
+
+.legend-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px; cursor: pointer; font-size: 12.5px;
+  border-radius: 2px;
+}
+.legend-row:hover { background: var(--bg-raised); }
+.legend-row input { accent-color: var(--accent); width: 12px; height: 12px; }
+
+/* Round, because that is the shape of the mark it stands for. */
+.swatch { width: 9px; height: 9px; flex: none; border-radius: 50%; }
+.legend-name { flex: 1; color: var(--text); }
+.legend-row.off { opacity: 0.4; }
+.legend-meta {
+  font-size: 11px; color: var(--text-faint);
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+
+/* ---------- search ---------- */
+
+.search-input { width: 100%; font-family: var(--mono); font-size: 12.5px; }
+.search-input::placeholder { color: var(--text-faint); font-family: var(--ui); opacity: 1; }
+.search-input::-webkit-search-cancel-button { filter: invert(0.5); }
+
+.search-results { list-style: none; margin: 6px 0 0; padding: 0; }
+
+.search-results li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 6px; cursor: pointer; font-size: 12.5px;
+  border-radius: 2px;
+}
+.search-results li:hover { background: var(--bg-raised); }
+.search-results li.active {
+  background: var(--bg-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.search-results .result-name { flex: 1; color: var(--text); font-family: var(--mono); }
+.search-results .result-meta { font-size: 11px; color: var(--text-faint); }
+.search-results .result-meta.spare { color: var(--warn); }
+
+.search-empty { font-size: 11.5px; color: var(--text-faint); padding: 5px; }
+
+.search-hint kbd {
+  font-family: var(--mono); font-size: 10.5px;
+  background: var(--bg-input); border: 1px solid var(--border-strong);
+  border-radius: 2px; padding: 0 4px; margin: 0 1px; color: var(--text-dim);
+}
+
+/* ---------- detail panel ---------- */
+
+.detail {
+  width: 296px; flex: none; overflow-y: auto; position: relative;
+  background: var(--bg-panel); border-left: 1px solid var(--border);
+  padding: 13px;
+}
+
+.close-btn {
+  position: absolute; top: 8px; right: 10px;
+  background: none; border: 0; color: var(--text-faint);
+  font-size: 17px; line-height: 1; cursor: pointer; padding: 2px 5px;
+  border-radius: 2px; font-family: var(--ui);
+}
+.close-btn:hover { color: var(--text); background: var(--bg-raised); }
+
+/* The mark colour rides a swatch beside the name, not the name itself: the
+   deep planes make poor text, and amber on a heading reads as a warning. */
+.detail h3 {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 24px 7px 0; font-size: 14px; font-weight: 600;
+  letter-spacing: 0.2px; color: var(--text);
+}
+.detail h3 .swatch { width: 10px; height: 10px; }
+.vis-list li > span:first-child { display: flex; align-items: center; gap: 7px; }
+
+.badge {
+  display: inline-block; font-size: 11px; font-weight: 500;
+  padding: 2px 7px; margin-bottom: 13px;
+  border: 1px solid; border-radius: var(--radius);
+}
+.badge.operational { color: var(--ok); border-color: #1d7a4a; }
+.badge.spare { color: var(--warn); border-color: #7a5f2c; }
+.badge.site { color: var(--text-dim); border-color: var(--border-strong); }
+
+/* Label left in sans, value right in monospace: the pair reads as a table
+   without needing rules down the middle. */
+.detail dl {
+  display: grid; grid-template-columns: auto 1fr; gap: 0 12px; margin: 0 0 15px;
+}
+.detail dt {
+  font-size: 12px; color: var(--text-dim); padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+.detail dd {
+  margin: 0; font-size: 12px; text-align: right; color: var(--text);
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  padding: 5px 0; border-bottom: 1px solid var(--border);
+}
+
+.detail h4 {
+  margin: 0 0 8px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-faint);
+}
+
+.vis-list { list-style: none; margin: 0 0 15px; padding: 0; }
+.vis-list li {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 12px; padding: 5px 0;
+  border-bottom: 1px solid var(--border); color: var(--text);
+}
+.vis-list li:last-child { border-bottom: 0; }
+.vis-list .el {
+  color: var(--text-dim); font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.vis-list.empty-note { color: var(--text-faint); font-size: 11.5px; border: 0; }
+
+.note { font-size: 11.5px; color: var(--text-dim); line-height: 1.6; margin: 0; }
+
+/* ---------- map symbols ---------- */
+
+.leaflet-container { background: var(--ocean); outline: none; font-family: var(--ui); }
+
+.leaflet-control-attribution {
+  background: rgba(16, 19, 22, 0.85) !important;
+  color: var(--text-dim) !important;
+  font-size: 10.5px !important;
+  border-left: 1px solid var(--border); border-top: 1px solid var(--border);
+}
+.leaflet-control-attribution a { color: var(--text-dim) !important; }
+
+.leaflet-control-zoom {
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--radius) !important; overflow: hidden;
+}
+.leaflet-control-zoom a {
+  background: var(--bg-panel); color: var(--text-dim);
+  border-color: var(--border) !important;
+  font-family: var(--ui); font-weight: 400;
+}
+.leaflet-control-zoom a:hover { background: var(--bg-raised); color: var(--text); }
+
+.leaflet-tooltip {
+  background: rgba(22, 25, 29, 0.95); border: 1px solid var(--border-strong);
+  color: var(--text); font-family: var(--mono); font-size: 11.5px;
+  box-shadow: none; border-radius: var(--radius); padding: 3px 7px;
+}
+.leaflet-tooltip::before { display: none; }
+
+/* Ground sites: a hollow square, so they never read as a satellite. Scaled by
+   --site-scale (set in view2d.js) so they grow with zoom on the same curve as
+   the satellite marks and labels. transform-origin sits on the dot's centre -
+   the marker's own anchor point - so the site's geographic position holds
+   still as it scales. */
+.site-icon { position: relative; }
+.site-mark {
+  position: absolute; left: 0; top: 0;
+  transform: scale(var(--site-scale, 1)); transform-origin: 5px 5px;
+}
+.site-dot {
+  position: absolute; left: 0; top: 0; width: 9px; height: 9px;
+  background: transparent; border: 1.5px solid #e6ebef;
+  box-sizing: border-box;
+}
+.site-dot::after {
+  content: ''; position: absolute; inset: 2px; background: #e6ebef;
+}
+.site-label {
+  position: absolute; left: 13px; top: -2px; white-space: nowrap;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 500; color: #e6ebef;
+  letter-spacing: 0.2px;
+  /* A dark halo for legibility over land, not a glow. */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.9);
+}
+.site-icon.selected .site-dot { border-color: #ffffff; }
+.site-icon.selected .site-dot::after { background: #ffffff; }
+.site-icon.selected .site-label { color: #ffffff; }
+
+.constellation-canvas { pointer-events: none; }
+.leaflet-container.sat-hover { cursor: crosshair; }
+
+/* ---------- loading ---------- */
+
+.loading-overlay {
+  position: absolute; inset: 0; z-index: 500;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  background: rgba(22, 25, 29, 0.92); color: var(--text);
+  font-size: 12.5px;
+}
+.loading-overlay.hidden { display: none; }
+
+.spinner {
+  width: 13px; height: 13px; border-radius: 50%;
+  border: 1.5px solid var(--border-strong); border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-note {
+  color: var(--warn); text-align: center; max-width: 380px; line-height: 1.6;
+}
+
+/* ---------- scrollbars ---------- */
+
+.sidebar::-webkit-scrollbar, .detail::-webkit-scrollbar,
+.dropdown-panel::-webkit-scrollbar { width: 10px; }
+.sidebar::-webkit-scrollbar-track, .detail::-webkit-scrollbar-track,
+.dropdown-panel::-webkit-scrollbar-track { background: var(--bg-panel); }
+.sidebar::-webkit-scrollbar-thumb, .detail::-webkit-scrollbar-thumb,
+.dropdown-panel::-webkit-scrollbar-thumb {
+  background: #333a42; border: 2px solid var(--bg-panel); border-radius: 5px;
+}
+.sidebar::-webkit-scrollbar-thumb:hover, .detail::-webkit-scrollbar-thumb:hover,
+.dropdown-panel::-webkit-scrollbar-thumb:hover { background: #444d56; }
+
+/* ---------- narrow screens ---------- */
+
+@media (max-width: 900px) {
+  .layout { flex-direction: column; }
+  .sidebar, .detail { width: 100%; max-height: 42%; border: 0; border-top: 1px solid var(--border); }
+  .stage { min-height: 320px; width: 100%; min-width: 0; }
+  .topbar { flex-wrap: wrap; height: auto; padding: 8px 12px; gap: 10px; }
+  .topbar-status { order: 3; width: 100%; margin-left: 0; }
+}
+
+/* ---------- Cesium chrome ----------
+   Attribution stays - Cesium's terms require it - but toned down so it does not
+   compete with the display. */
+
+.cesium-widget-credits {
+  opacity: 0.32;
+  font-family: var(--ui) !important;
+  font-size: 10px !important;
+  color: var(--text-faint) !important;
+}
+.cesium-widget-credits:hover { opacity: 0.7; }
+.cesium-credit-logoContainer img { height: 16px !important; }
+.cesium-widget, .cesium-widget canvas { background: var(--bg) !important; }
