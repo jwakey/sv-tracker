@@ -17,7 +17,7 @@
 // magnitude dimmer than the links so the two never read as related.
 export const MAP_COLORS = {
   ocean: '#0e1215',
-  land: '#15ff00',
+  land: '#1e252c',
   coast: '#98a3ad',
   graticule: 'rgba(160, 174, 188, 0.10)',
   equator: 'rgba(160, 174, 188, 0.24)',
