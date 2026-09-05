@@ -11,6 +11,7 @@ import { create3DView } from './view3d.js';
 import { initUI } from './ui.js';
 import { searchCatalog, toTracked, fetchByCatalogNumber } from './catalog.js';
 import { screenConjunctions } from './conjunction.js';
+import { loadRadarIndex, radarFrameAt, RADAR_REFRESH_MS } from './radar.js';
 
 const TICK_MS = 200;
 const MAX_OFFSET_MS = 24 * 60 * 60 * 1000;
@@ -74,12 +75,22 @@ const state = {
     showSatNames: true,
     highlightSpares: false,
     dayNight: true,
+    // Off to start with, and for a harder reason than the footprints: it is
+    // the one layer that reaches the network on its own, so nothing is fetched
+    // from RainViewer until someone asks for weather.
+    radar: false,
     maskDeg: 8.2,
     // Fraction of full strength, not an alpha. Each view scales it to its own
     // maximum, so 0.3 looks the same on the map and the globe.
     footprintOpacity: 0.3,
   },
   time: { simMs: Date.now(), rate: 1, playing: true, current: new Date() },
+
+  // Precipitation radar. `index` is RainViewer's list of available frames and
+  // `frame` is the one the clock is currently standing in - which is null
+  // whenever the clock is outside the couple of hours the index covers, and
+  // both views draw nothing then. See js/radar.js.
+  radar: { index: null, frame: null, error: null, loading: false },
 
   screening: {
     running: false,
@@ -441,6 +452,41 @@ function computeTracks(date) {
 }
 
 /**
+ * Keep the radar index current, and pick the frame the clock is standing in.
+ *
+ * The index is only fetched while the layer is on, and only once it has gone
+ * stale - RainViewer's window rolls forward every ten minutes, so a session
+ * left open needs a new one, but a session with radar switched off needs none
+ * at all. A failed fetch is kept and shown rather than retried in a tight
+ * loop: the tick would otherwise hammer the API for as long as it was down.
+ */
+function refreshRadar() {
+  const radar = state.radar;
+
+  if (state.opts.radar && !radar.loading
+      && (!radar.index || Date.now() - radar.index.fetchedMs >= RADAR_REFRESH_MS)) {
+    radar.loading = true;
+    loadRadarIndex()
+      .then((index) => { radar.index = index; radar.error = null; })
+      .catch((err) => { radar.error = err.message; })
+      .finally(() => {
+        radar.loading = false;
+        radar.frame = state.opts.radar
+          ? radarFrameAt(radar.index, state.time.current.getTime()) : null;
+        ui.renderRadarStatus();
+        if (activeView) activeView.render(state);
+      });
+  }
+
+  const frame = state.opts.radar
+    ? radarFrameAt(radar.index, state.time.current.getTime()) : null;
+  if (frame !== radar.frame) {
+    radar.frame = frame;
+    ui.renderRadarStatus();
+  }
+}
+
+/**
  * Carry simulated time forward to now.
  *
  * Both loops below call this, and each one consumes the real time elapsed
@@ -495,6 +541,7 @@ function tick() {
   computePositions(state.time.current);
   computePlaneRings(state.time.current);
   computeTracks(state.time.current);
+  refreshRadar();
 
   if (activeView) activeView.render(state);
   ui.renderClock();
@@ -735,6 +782,12 @@ async function main() {
       if (key === 'showSpares') {
         ui.renderLegend();
         ui.syncOptionInputs();
+      }
+      // Radar is the one option that reaches the network, so switching it on
+      // starts that here rather than leaving it to the next tick.
+      if (key === 'radar') {
+        refreshRadar();
+        ui.renderRadarStatus();
       }
       // Opacity moves nothing, and arrives continuously while the slider is
       // dragged, so it repaints instead of propagating all 80 satellites.

@@ -27,6 +27,7 @@ import {
 import { conjunctionColor } from './conjunction.js';
 import { satColor } from './classify.js';
 import { MAP_COLORS as COLORS } from './palette.js';
+import { radarTiles, radarZoomFor, RADAR_ALPHA } from './radar.js';
 import { loadLand } from './basemap.js';
 import {
   markScale, markRadius, drawMark, labelSize, labelOffsetAcross,
@@ -200,7 +201,7 @@ export function create2DView(container, handlers = {}) {
   });
 
   L.control.attribution({ prefix: false })
-    .addAttribution('Coastlines: Natural Earth &middot; Orbits: CelesTrak')
+    .addAttribution('Coastlines: Natural Earth &middot; Orbits: CelesTrak &middot; Radar: RainViewer')
     .addTo(map);
 
   // sitePane sits above the base overlay pane (ocean/land/footprints/pulses),
@@ -417,6 +418,10 @@ export function create2DView(container, handlers = {}) {
     clipToWorld(ctx, proj);
     // Under everything else - it is lighting, not data.
     if (state.opts.dayNight) drawDayNight(view);
+    // Over the lighting and under the constellation: weather is data, and it
+    // is the ground the satellites are passing over rather than part of the
+    // constellation itself.
+    drawRadar(view);
     drawFootprints(view, frame);
     drawPlaneRings(view, frame);
     drawGroundTrack(view, frame);
@@ -575,6 +580,45 @@ export function create2DView(container, handlers = {}) {
     ctx.strokeStyle = COLORS.terminator;
     ctx.lineWidth = 1.2;
     ctx.stroke();
+  }
+
+  /**
+   * Precipitation radar, as plate carree tiles from js/radar.js.
+   *
+   * The tiles arrive already resampled out of Web Mercator, which is what lets
+   * this be one drawImage each: the box a tile covers is a lat/lon rectangle,
+   * and lat/lon rectangles are exactly what this projection draws as
+   * rectangles. Tiles still loading come back as a piece of whichever coarser
+   * tile is already in hand, so the layer holds its picture across a zoom
+   * instead of blanking until the new level arrives.
+   */
+  function drawRadar(view) {
+    if (!state.opts.radar || !state.radar.frame) return;
+    const { ctx, proj } = view;
+
+    const tiles = radarTiles(
+      state.radar.index,
+      state.radar.frame,
+      { west: view.west, east: view.east, south: view.south, north: view.north },
+      radarZoomFor(view.zoom),
+      () => layer.redraw(),
+    );
+    if (!tiles.length) return;
+
+    ctx.globalAlpha = RADAR_ALPHA;
+    for (const tile of tiles) {
+      const x = proj.x(tile.bounds.west);
+      const y = proj.y(tile.bounds.north);
+      // Source rectangle as well as destination: a tile that has not arrived
+      // yet is covered by part of a coarser one that has, and only radar.js
+      // knows which part that is.
+      ctx.drawImage(
+        tile.canvas,
+        tile.sx, tile.sy, tile.sw, tile.sh,
+        x, y, proj.x(tile.bounds.east) - x, proj.y(tile.bounds.south) - y,
+      );
+    }
+    ctx.globalAlpha = 1;
   }
 
   function drawFootprints(view, f) {

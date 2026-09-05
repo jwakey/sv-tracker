@@ -20,6 +20,7 @@ import {
   EARTH_RADIUS_KM, greatCircleArc, subsolarPoint, destination,
 } from './geo.js';
 import { conjunctionColor } from './conjunction.js';
+import { radarTileTemplate, radarMaxZoom, RADAR_ALPHA } from './radar.js';
 import { MAP_COLORS } from './palette.js';
 import { loadLand, renderBasemapTile } from './basemap.js';
 import {
@@ -305,6 +306,8 @@ export async function create3DView(container, handlers = {}) {
   let terminatorEntity = null;
   let pairEntity = null;
   let pairTickEntities = [];
+  let radarLayer = null;
+  let radarFramePath = null;
   let pairLabelEntity = null;
   // The satellite the camera is currently pivoting about, if any. Held by id so
   // the pivot can be released without caring whether the entity still exists.
@@ -742,9 +745,46 @@ export async function create3DView(container, handlers = {}) {
     }
   }
 
+  /**
+   * Precipitation radar, as a second imagery layer over the basemap.
+   *
+   * The globe takes RainViewer's tiles as they are served: a Web Mercator
+   * tiling scheme is one of the things Cesium knows how to reproject onto an
+   * ellipsoid, so unlike the map this needs no resampling of its own.
+   *
+   * A frame is a whole set of tiles under its own URL, so changing frames
+   * means a new provider rather than a refresh - hence the rebuild, which
+   * happens when the clock crosses into another ten-minute frame and not
+   * otherwise. Entities are drawn over imagery whatever the order here, so
+   * this cannot bury the constellation.
+   */
+  function renderRadar(state) {
+    const frame = state.opts.radar ? state.radar.frame : null;
+    const path = frame ? frame.path : null;
+    if (path === radarFramePath) return;
+    radarFramePath = path;
+
+    if (radarLayer) {
+      viewer.imageryLayers.remove(radarLayer, true);
+      radarLayer = null;
+    }
+    if (!path) return;
+
+    radarLayer = viewer.imageryLayers.addImageryProvider(
+      new Cesium.UrlTemplateImageryProvider({
+        url: radarTileTemplate(state.radar.index, frame),
+        tilingScheme: new Cesium.WebMercatorTilingScheme(),
+        maximumLevel: radarMaxZoom(),
+        credit: 'Radar: RainViewer',
+      }),
+    );
+    radarLayer.alpha = RADAR_ALPHA;
+  }
+
   function render(state) {
     current = state;
     renderSites(state);
+    renderRadar(state);
 
     // Drive Cesium's clock from simulated time, so the shading follows the
     // scrubber instead of being pinned to page load.

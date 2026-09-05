@@ -127,6 +127,8 @@ export function initUI(state, on) {
     optPlaneLinks: $('opt-planelinks'),
     optSatNames: $('opt-satnames'),
     optDayNight: $('opt-daynight'),
+    optRadar: $('opt-radar'),
+    radarHint: $('radar-hint'),
     maskInput: $('mask-input'),
     footprintReadout: $('footprint-readout'),
     footprintOpacity: $('footprint-opacity'),
@@ -628,6 +630,7 @@ export function initUI(state, on) {
   el.optFootprints.addEventListener('change', () => on.setOpt('showFootprints', el.optFootprints.checked));
   el.optVisLines.addEventListener('change', () => on.setOpt('showVisLines', el.optVisLines.checked));
   el.optDayNight.addEventListener('change', () => on.setOpt('dayNight', el.optDayNight.checked));
+  el.optRadar.addEventListener('change', () => on.setOpt('radar', el.optRadar.checked));
   el.optPlaneLinks.addEventListener('change', () => on.setOpt('showPlaneLinks', el.optPlaneLinks.checked));
   el.optSatNames.addEventListener('change', () => on.setOpt('showSatNames', el.optSatNames.checked));
 
@@ -814,9 +817,39 @@ export function initUI(state, on) {
     el.optFootprints.checked = state.opts.showFootprints;
     el.optVisLines.checked = state.opts.showVisLines;
     el.optDayNight.checked = state.opts.dayNight;
+    el.optRadar.checked = state.opts.radar;
     el.optPlaneLinks.checked = state.opts.showPlaneLinks;
     el.optSatNames.checked = state.opts.showSatNames;
     el.footprintOpacity.value = String(Math.round(state.opts.footprintOpacity * 100));
+  }
+
+  /**
+   * What the radar layer is currently showing, under its checkbox.
+   *
+   * Worth a line of its own because the layer can be on and showing nothing
+   * for a reason that is not a fault: RainViewer keeps about two hours of
+   * frames, and this clock scrubs over days. Without saying so, a scrubbed
+   * clock just looks like broken weather.
+   */
+  function renderRadarStatus() {
+    const { radar } = state;
+    if (!state.opts.radar) {
+      el.radarHint.hidden = true;
+      return;
+    }
+
+    el.radarHint.hidden = false;
+    if (radar.error) {
+      el.radarHint.textContent = `Radar unavailable: ${radar.error}`;
+    } else if (radar.frame) {
+      const at = new Date(radar.frame.timeMs);
+      el.radarHint.textContent = `Radar ${at.toISOString().slice(11, 16)}Z, from RainViewer.`;
+    } else if (radar.index) {
+      el.radarHint.textContent = 'No radar for this time - it covers about two hours either '
+        + 'side of now, and the clock is outside that.';
+    } else {
+      el.radarHint.textContent = 'Loading radar\u2026';
+    }
   }
 
   function renderDetail() {
@@ -845,7 +878,7 @@ export function initUI(state, on) {
   return {
     setLoading, showError, setActiveView, renderStatus, renderClock,
     renderOptions, renderLegend, renderDetail, syncOptionInputs, renderSearch,
-    renderCatalog, renderTracked, renderScreening,
+    renderCatalog, renderTracked, renderScreening, renderRadarStatus,
   };
 }
 
