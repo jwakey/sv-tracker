@@ -24,7 +24,7 @@ import { MAP_COLORS } from './palette.js';
 import { loadLand, renderBasemapTile } from './basemap.js';
 import {
   markTexture, siteTexture, labelSize, markRadius, labelOffsetAcross,
-  GLOBE_MARK_SCALE, SAT_KNOCKOUT_PX, LABEL_GAP_PX, LABEL_FAMILY,
+  GLOBE_MARK_SCALE, SAT_KNOCKOUT_PX, LABEL_GAP_PX, LABEL_FAMILY, READOUT_FAMILY,
 } from './symbology.js';
 
 const CESIUM_VERSION = '1.121';
@@ -225,7 +225,6 @@ export async function create3DView(container, handlers = {}) {
   const linkEntities = [];
   const pulseEntities = [];
   const planeRingEntities = new Map(); // plane index -> entity
-  const headingEntities = [];
   const trackEntities = [];
   let terminatorEntity = null;
   let pairEntity = null;
@@ -233,10 +232,6 @@ export async function create3DView(container, handlers = {}) {
   // The satellite the camera is currently pivoting about, if any. Held by id so
   // the pivot can be released without caring whether the entity still exists.
   let pivotEntityId = null;
-
-  // Highlighted satellites and the point each is flying towards. Rebuilt every
-  // render, read by the heading entities' CallbackProperties.
-  let headings = [];
 
   // Latest state, read by the CallbackProperties below.
   //
@@ -246,6 +241,19 @@ export async function create3DView(container, handlers = {}) {
   // its async build.
   let current = null;
   let hoverSatId = null;
+
+  // Cesium parses a CSS colour string every time it is handed one, and with an
+  // approach up render() runs once a frame over the whole constellation. The
+  // palette is a dozen colours that hold for the session.
+  const cesiumColors = new Map();
+  const cesiumColor = (css) => {
+    let color = cesiumColors.get(css);
+    if (!color) {
+      color = Cesium.Color.fromCssColorString(css);
+      cesiumColors.set(css, color);
+    }
+    return color;
+  };
 
   /**
    * A plane's ring, drawn through its satellites at orbital altitude.
@@ -312,23 +320,6 @@ export async function create3DView(container, handlers = {}) {
     return Cesium.Cartesian3.fromDegreesArrayHeights(coords);
   };
 
-  /**
-   * The stub of orbit a highlighted satellite is about to fly.
-   *
-   * Stands in for the map's fixed-size arrowhead, which does not work on a
-   * globe: a screen glyph cannot be pinned to a point that rotates out of
-   * view.
-   */
-  const headingPositions = (i) => {
-    const heading = headings[i];
-    if (!heading) return [];
-    const { pos } = heading;
-    return [
-      Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, pos.altKm * 1000),
-      Cesium.Cartesian3.fromDegrees(pos.ahead.lon, pos.ahead.lat, pos.ahead.altKm * 1000),
-    ];
-  };
-
   // Hide satellites behind the Earth.
   //
   // The points set disableDepthTestDistance so they draw crisply over the
@@ -372,7 +363,7 @@ export async function create3DView(container, handlers = {}) {
   // not hand the size back, but the offset that keeps the box off the line has
   // to know how wide it is - so it is measured here, with the same font.
   const labelMetrics = document.createElement('canvas').getContext('2d');
-  labelMetrics.font = `600 ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`;
+  labelMetrics.font = `600 ${GLOBE_LABEL_PX}px ${READOUT_FAMILY}`;
   let pairLabelText = null;
   let pairLabelHalfW = 0;
 
@@ -588,10 +579,21 @@ export async function create3DView(container, handlers = {}) {
       }
 
       const cssColor = satColor(sat, state.planes);
-      const color = Cesium.Color.fromCssColorString(cssColor);
+      const color = cesiumColor(cssColor);
       const selected = state.selectedSatId === sat.id;
       const highlighted = state.isHighlighted(sat);
-      const cart = Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, pos.altKm * 1000);
+
+      // Everything below writes to an entity only when the value has changed.
+      //
+      // That is not thrift for its own sake. While an approach is up this pass
+      // runs once a frame, but only the two satellites in the pair have been
+      // propagated - and assigning to an entity property allocates a Cesium
+      // property and raises a change event whether or not the value differs.
+      // For a footprint that change event means the whole disc is tessellated
+      // and its primitive rebuilt, so writing back the position it already has
+      // would rebuild sixty-odd discs a frame to no effect.
+      const moved = entity === undefined
+        || entity._lat !== pos.lat || entity._lon !== pos.lon || entity._alt !== pos.altKm;
 
       const spare = sat.status === 'spare';
       const hovered = hoverSatId === sat.id;
@@ -603,7 +605,7 @@ export async function create3DView(container, handlers = {}) {
         const satId = sat.id;
         entity = viewer.entities.add({
           id: `sat:${satId}`,
-          position: cart,
+          position: Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, pos.altKm * 1000),
           billboard: {
             image: mark.canvas,
             scale: mark.scale,
@@ -635,27 +637,43 @@ export async function create3DView(container, handlers = {}) {
           },
         });
         satEntities.set(sat.id, entity);
-      } else {
-        entity.position = cart;
+      } else if (moved) {
+        entity.position = Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, pos.altKm * 1000);
       }
+      entity._lat = pos.lat;
+      entity._lon = pos.lon;
+      entity._alt = pos.altKm;
 
       entity.show = true;
       // Swapping the image is how state shows on the globe: the texture cache
-      // means each appearance is drawn once for the whole session.
-      entity.billboard.image = mark.canvas;
-      entity.billboard.scale = mark.scale;
-      entity.label.fillColor = color;
-      entity.label.pixelOffset = new Cesium.Cartesian2(labelOffset(spare, selected), 0);
+      // means each appearance is drawn once for the whole session, and hands
+      // back the same object for the same appearance - so this compares marks,
+      // not their contents.
+      if (entity._mark !== mark) {
+        entity._mark = mark;
+        entity.billboard.image = mark.canvas;
+        entity.billboard.scale = mark.scale;
+      }
+      if (entity._labelColor !== cssColor) {
+        entity._labelColor = cssColor;
+        entity.label.fillColor = color;
+      }
+      const offset = labelOffset(spare, selected);
+      if (entity._labelOffset !== offset) {
+        entity._labelOffset = offset;
+        entity.label.pixelOffset = new Cesium.Cartesian2(offset, 0);
+      }
 
-      // Suppressed for catalogue objects, as on the map - see buildFrame().
-      const wantFootprint = (state.opts.showFootprints || highlighted) && !sat.noFootprint;
+      // Suppressed for catalogue objects and for an approach's pair, as on
+      // the map - see hasFootprint().
+      const wantFootprint = (state.opts.showFootprints || highlighted)
+        && state.hasFootprint(sat);
       if (wantFootprint) {
         const radiusM = pos.gammaRad * EARTH_RADIUS_KM * 1000;
-        const surface = Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, 0);
         if (!footprint) {
           footprint = viewer.entities.add({
             id: `fp:${sat.id}`,
-            position: surface,
+            position: Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, 0),
             ellipse: {
               semiMajorAxis: radiusM,
               semiMinorAxis: radiusM,
@@ -668,17 +686,32 @@ export async function create3DView(container, handlers = {}) {
             },
           });
           footprintEntities.set(sat.id, footprint);
-        } else {
-          footprint.position = surface;
+        } else if (footprint._lat !== pos.lat || footprint._lon !== pos.lon
+          || footprint._radiusM !== radiusM) {
+          // Against the disc's own last geometry, not the mark's: a hidden
+          // footprint is left where it was while its satellite goes on moving,
+          // so it has to catch up the moment it is shown again.
+          footprint.position = Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, 0);
           footprint.ellipse.semiMajorAxis = radiusM;
           footprint.ellipse.semiMinorAxis = radiusM;
         }
+        footprint._lat = pos.lat;
+        footprint._lon = pos.lon;
+        footprint._radiusM = radiusM;
         footprint.show = true;
-        footprint.ellipse.material = color.withAlpha(state.opts.footprintOpacity
-          * (highlighted ? FOOTPRINT_SELECTED_ALPHA_MAX : FOOTPRINT_ALPHA_MAX));
-        // Only a highlighted footprint is stroked, as on the map.
-        footprint.ellipse.outline = highlighted;
-        footprint.ellipse.outlineColor = color.withAlpha(0.75);
+
+        // Same again for how it is painted: a fresh material every frame would
+        // put the disc through the same rebuild as a move.
+        const alpha = state.opts.footprintOpacity
+          * (highlighted ? FOOTPRINT_SELECTED_ALPHA_MAX : FOOTPRINT_ALPHA_MAX);
+        const look = `${cssColor}|${alpha}|${highlighted}`;
+        if (footprint._look !== look) {
+          footprint._look = look;
+          footprint.ellipse.material = color.withAlpha(alpha);
+          // Only a highlighted footprint is stroked, as on the map.
+          footprint.ellipse.outline = highlighted;
+          footprint.ellipse.outlineColor = color.withAlpha(0.75);
+        }
       } else if (footprint) {
         footprint.show = false;
       }
@@ -711,7 +744,7 @@ export async function create3DView(container, handlers = {}) {
       pairLabelEntity = viewer.entities.add({
         position: new Cesium.CallbackProperty(pairMidpoint, false),
         label: {
-          font: `600 ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`,
+          font: `600 ${GLOBE_LABEL_PX}px ${READOUT_FAMILY}`,
           showBackground: true,
           backgroundColor: Cesium.Color.fromCssColorString(MAP_COLORS.labelBg),
           backgroundPadding: new Cesium.Cartesian2(PAIR_LABEL_PAD_X, PAIR_LABEL_PAD_Y),
@@ -762,9 +795,9 @@ export async function create3DView(container, handlers = {}) {
     }
 
     // Orbit paths, one revolution either side of now at the altitude each flies.
-    // No seam handling needed in 3D. A pool grown to fit, like the heading stubs
-    // and the link lines: with a conjunction up there are two of these, and the
-    // count changes as the selection does.
+    // No seam handling needed in 3D. A pool grown to fit, like the link lines:
+    // with a conjunction up there are two of these, and the count changes as
+    // the selection does.
     const tracks = state.tracks || [];
     while (trackEntities.length < tracks.length) {
       const i = trackEntities.length;
@@ -793,42 +826,11 @@ export async function create3DView(container, handlers = {}) {
       }
     });
 
-    // Direction stubs for the highlighted satellites.
-    //
-    // Not for catalogue objects. They are highlighted permanently - that is
-    // what makes one findable among eighty - so on the globe the stub is always
-    // there, and a fixed-length line running off a mark reads as another orbit
-    // rather than as a direction. The map keeps its arrowhead, which is a glyph
-    // on the mark and does not have that problem.
-    headings = [];
-    for (const sat of state.sats) {
-      if (sat.tracked) continue;
-      const pos = state.positions.get(sat.id);
-      if (!pos || !pos.ahead || !state.isHighlighted(sat)) continue;
-      headings.push({ id: sat.id, pos, color: satColor(sat, state.planes) });
-    }
-    while (headingEntities.length < headings.length) {
-      const i = headingEntities.length;
-      headingEntities.push(viewer.entities.add({
-        polyline: {
-          positions: new Cesium.CallbackProperty(() => headingPositions(i), false),
-          width: 3,
-          arcType: Cesium.ArcType.NONE,
-          material: Cesium.Color.WHITE,
-        },
-      }));
-    }
-    headingEntities.forEach((entity, i) => {
-      const heading = headings[i];
-      entity.show = Boolean(heading);
-      if (!heading) return;
-      // Swap the material only when this slot changes colour. The highlighted
-      // set is stable for long stretches and every assignment allocates.
-      if (entity._headingColor !== heading.color) {
-        entity._headingColor = heading.color;
-        entity.polyline.material = Cesium.Color.fromCssColorString(heading.color).withAlpha(0.9);
-      }
-    });
+    // No direction stub on the globe. A short line running off a mark reads as
+    // another orbit rather than as an arrow, and a selected satellite already
+    // has its orbit track, which says which way it is going and does so along
+    // the whole revolution. The map keeps its arrowhead, which is a glyph on
+    // the mark and has neither problem.
 
     // Great-circle chain joining each plane's satellites in orbit order.
     const live = new Set(state.planeRings.map((r) => r.index));

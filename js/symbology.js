@@ -44,7 +44,22 @@ export const LABEL_BASE_PX = 12;
 export const LABEL_MIN_PX = 11;
 export const LABEL_MAX_PX = 19;
 export const LABEL_GAP_PX = 3;
-export const LABEL_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+// Names are set in the interface sans, the same stack the chrome uses.
+//
+// They were monospace, and that is what made the map labels look hand-spaced.
+// A fixed pitch gives every glyph the same cell, so "IRIDIUM 33 DEB" comes out
+// with a gulf either side of each I and an M crushed against its neighbours,
+// and the eye reads the uneven ink as bad alignment. A satellite name is not a
+// value read digit by digit - which is the rule the stylesheet sets out at the
+// top - so it takes the proportional face and the spacing the type designer
+// intended.
+export const LABEL_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+
+// The range readout between a conjunction's two marks is a value, and one that
+// runs down five times a second, so it keeps the fixed pitch: proportional
+// digits are different widths and the box would breathe in and out as the
+// number changed. Matches --mono in the stylesheet.
+export const READOUT_FAMILY = '"SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace';
 export const LABEL_OUTLINE = 'rgba(8, 11, 14, 0.95)';
 
 // Direction arrow on a highlighted satellite: a small head just clear of the

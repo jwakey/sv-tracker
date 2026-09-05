@@ -9,6 +9,16 @@ import { ACCURACY_NOTE, CLOSE_APPROACH_KM, CRITICAL_APPROACH_KM } from './conjun
 
 const $ = (id) => document.getElementById(id);
 
+// How far one press of an arrow key moves the clock. The scrubber's own step,
+// so a notch of the slider and a press of a key are the same amount of time.
+const SCRUB_STEP_MS = 60000;
+
+// Except while an approach is up, where a minute is the whole event. The pair
+// closes and opens again over a couple of minutes, and the interesting part -
+// the run down to closest approach and back out - is seconds wide, so a
+// minute a press steps straight over it. Ten seconds walks through it.
+const CONJUNCTION_SCRUB_STEP_MS = 1000;
+
 /** Format a Date as YYYY-MM-DD HH:MM, in UTC. */
 const utcStamp = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
 
@@ -242,14 +252,80 @@ export function initUI(state, on) {
     }
   });
 
+  // Input types the browser presses rather than types into. Everything else,
+  // known or not, is treated as a field: an unrecognised type is far more
+  // likely to be a text box than a button.
+  const PRESSED_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset']);
+
+  const inputType = (element) => String(element.type || 'text').toLowerCase();
+
+  /**
+   * Whether the keystroke belongs to whatever has focus rather than to the
+   * page.
+   *
+   * A select and a range slider are not text boxes, but they answer to the
+   * arrow keys themselves and taking those away from a focused control would
+   * be worse than not having the shortcut. A checkbox does not, so focus left
+   * on one after toggling a display option is no reason for the clock keys to
+   * stop working.
+   */
+  function typingInField() {
+    const active = document.activeElement;
+    if (!active) return false;
+    if (active.isContentEditable) return true;
+    const tag = active.tagName;
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (tag === 'INPUT') return !PRESSED_INPUTS.has(inputType(active));
+    return false;
+  }
+
+  /** Whether the browser already uses the space bar to press what has focus. */
+  function pressedBySpace() {
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = active.tagName;
+    if (tag === 'BUTTON' || tag === 'A') return true;
+    if (tag === 'INPUT') return PRESSED_INPUTS.has(inputType(active));
+    return active.getAttribute('role') === 'button';
+  }
+
   // "/" focuses the search box from anywhere, unless already typing.
   document.addEventListener('keydown', (e) => {
     if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
-    const tag = document.activeElement && document.activeElement.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (typingInField()) return;
     e.preventDefault();
     el.search.focus();
     el.search.select();
+  });
+
+  /**
+   * The clock, from anywhere on the page: arrows scrub, space plays and pauses.
+   *
+   * A minute a press, which is the scrubber's own step, so holding an arrow
+   * runs the display through about an hour a second and the two controls agree
+   * on what one notch of time is - ten seconds a press with an approach up,
+   * which is the scale that event happens on. nudgeTime() clamps to the same
+   * day either side that the scrubber reaches.
+   *
+   * Space is skipped wherever the browser already presses something with it -
+   * a focused button, a checkbox - or the Pause button would toggle twice from
+   * one keystroke. preventDefault() stops the page scrolling on the rest.
+   */
+  document.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || typingInField()) return;
+
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const step = state.conjunction ? CONJUNCTION_SCRUB_STEP_MS : SCRUB_STEP_MS;
+      on.nudgeTime(e.key === 'ArrowRight' ? step : -step);
+      return;
+    }
+
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      if (pressedBySpace()) return;
+      e.preventDefault();
+      on.togglePlay();
+    }
   });
 
   function chooseResult(id) {

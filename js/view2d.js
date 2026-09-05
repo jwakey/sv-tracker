@@ -31,7 +31,7 @@ import { loadLand } from './basemap.js';
 import {
   markScale, markRadius, drawMark, labelSize, labelOffsetAcross,
   SAT_KNOCKOUT_PX, SAT_R_OPERATIONAL, SAT_R_SPARE, SAT_R_SELECTED,
-  LABEL_GAP_PX, LABEL_FAMILY, LABEL_OUTLINE,
+  LABEL_GAP_PX, LABEL_FAMILY, READOUT_FAMILY, LABEL_OUTLINE,
   HEADING_GAP_PX, HEADING_LEN_PX, HEADING_HALF_PX,
 } from './symbology.js';
 
@@ -127,6 +127,11 @@ export function create2DView(container, handlers = {}) {
     zoomDelta: 1,
     // Replaced wholesale by wheelZoom() below.
     scrollWheelZoom: false,
+    // Leaflet focuses the map on click and then pans it with the arrow keys.
+    // Those belong to the clock now - see the shortcuts in ui.js - and a click
+    // on the map is how you select a satellite, so leaving this on would mean
+    // scrubbing worked everywhere except the thing being scrubbed.
+    keyboard: false,
   });
 
   L.control.attribution({ prefix: false })
@@ -237,10 +242,10 @@ export function create2DView(container, handlers = {}) {
       const highlighted = st.isHighlighted(sat);
       const color = satColor(sat, st.planes);
 
-      // noFootprint is set on catalogue objects: the coverage disc is a comms
-      // figure and they are not comms assets, and one drawn at an arbitrary
-      // altitude can cover a hemisphere.
-      if ((st.opts.showFootprints || highlighted) && !sat.noFootprint) {
+      // hasFootprint() rules out catalogue objects - the coverage disc is a
+      // comms figure and they are not comms assets - and both halves of an
+      // approach, which the disc would bury.
+      if ((st.opts.showFootprints || highlighted) && st.hasFootprint(sat)) {
         const rings = footprintRings(pos.lat, pos.lon, pos.gammaRad).map(boundPath);
         // Only a highlighted footprint is stroked, so only it needs the real
         // boundary worked out separately from the filled rings.
@@ -664,7 +669,7 @@ export function create2DView(container, handlers = {}) {
 
     const size = labelSize(markScale(view.zoom));
     const pad = size * 0.42;
-    ctx.font = `600 ${size.toFixed(1)}px ${LABEL_FAMILY}`;
+    ctx.font = `600 ${size.toFixed(1)}px ${READOUT_FAMILY}`;
     ctx.textBaseline = 'middle';
 
     const boxW = ctx.measureText(text).width + pad * 2;

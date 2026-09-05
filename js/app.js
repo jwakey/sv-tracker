@@ -122,6 +122,26 @@ const state = {
     if (sat.tracked) return true;
     return this.opts.highlightSpares && sat.status === 'spare' && this.isVisible(sat);
   },
+
+  /**
+   * Whether a satellite draws a coverage footprint.
+   *
+   * Never for a catalogue object, which is on the map because someone put it
+   * there and has no service area to show.
+   *
+   * And never for either half of an approach. A footprint is a two-and-a-half
+   * thousand kilometre disc, and the thing being looked at is a gap of a few
+   * kilometres between two marks - so the disc covers the whole question and
+   * answers none of it. It is also the one piece of geometry on the globe that
+   * has to be rebuilt every time it moves, which is what made it flicker under
+   * the pair.
+   */
+  hasFootprint(sat) {
+    if (sat.noFootprint) return false;
+    const pair = this.conjunction;
+    if (pair && (pair.aId === sat.id || pair.bId === sat.id)) return false;
+    return true;
+  },
 };
 
 /** Rebuild the drawing set from the constellation and the tracked objects. */
@@ -221,21 +241,24 @@ async function fetchJSON(url, fallback) {
 
 // ------------------------------------------------------------ per-tick work
 
+/** Propagate one satellite into state.positions. Silent if SGP4 fails. */
+function updatePosition(sat, date) {
+  const pos = propagateSat(sat.satrec, date);
+  if (!pos) return;
+  pos.gammaRad = footprintAngularRadius(pos.altKm, state.opts.maskDeg);
+  // Where it will be shortly, for the direction arrow. One extra SGP4 call
+  // per highlighted satellite.
+  if (state.isHighlighted(sat)) {
+    const ahead = propagateSat(sat.satrec, new Date(date.getTime() + LEAD_SEC * 1000));
+    if (ahead) pos.ahead = { lat: ahead.lat, lon: ahead.lon, altKm: ahead.altKm };
+  }
+  state.positions.set(sat.id, pos);
+}
+
 /** Propagate every satellite, then rebuild visibility and the spare links. */
 function computePositions(date) {
   state.positions.clear();
-  for (const sat of state.sats) {
-    const pos = propagateSat(sat.satrec, date);
-    if (!pos) continue;
-    pos.gammaRad = footprintAngularRadius(pos.altKm, state.opts.maskDeg);
-    // Where it will be shortly, for the direction arrow. One extra SGP4 call
-    // per highlighted satellite.
-    if (state.isHighlighted(sat)) {
-      const ahead = propagateSat(sat.satrec, new Date(date.getTime() + LEAD_SEC * 1000));
-      if (ahead) pos.ahead = { lat: ahead.lat, lon: ahead.lon, altKm: ahead.altKm };
-    }
-    state.positions.set(sat.id, pos);
-  }
+  for (const sat of state.sats) updatePosition(sat, date);
 
   state.visibility.clear();
   state.visLinks = [];
@@ -334,6 +357,12 @@ function computePlaneRings(date) {
   state.planeRings = [];
   if (!state.opts.showPlaneLinks) return;
 
+  // Not while an approach is up. Every satellite in the pair's own plane is
+  // threaded onto one of these lines, so the ring runs straight through the
+  // two marks being compared and reads as a third piece of geometry crossing
+  // the gap. The approach is a two-object question and the display says so.
+  if (state.conjunction) return;
+
   for (const plane of state.planes) {
     if (!plane.visible || !state.opts.showOperational) continue;
 
@@ -389,7 +418,14 @@ function computeTracks(date) {
   }
 }
 
-function tick() {
+/**
+ * Carry simulated time forward to now.
+ *
+ * Both loops below call this, and each one consumes the real time elapsed
+ * since whichever called it last - so the clock advances once however often it
+ * is asked, and the two cannot run it forward twice for the same interval.
+ */
+function advanceClock() {
   const nowMs = performance.now();
   const elapsed = nowMs - lastFrameMs;
   lastFrameMs = nowMs;
@@ -398,8 +434,42 @@ function tick() {
     state.time.simMs += elapsed * state.time.rate;
   }
   clampOffset();
-
   state.time.current = new Date(state.time.simMs);
+}
+
+/**
+ * The two halves of an approach, moved once per animation frame.
+ *
+ * The regular tick is five a second, which for the constellation is finer than
+ * anyone can see: at globe scale a satellite covers about a tenth of a pixel
+ * between frames. An approach is the one thing that is not viewed at globe
+ * scale. The camera closes to within a few kilometres and pivots about one of
+ * the pair, so a position that arrives in steps steps the whole scene with it,
+ * and the pass that should glide across the frame stutters instead.
+ *
+ * Only the two are propagated - four SGP4 calls a frame with the lead points,
+ * against the four hundred the whole constellation and its tracks would cost.
+ * Everything else keeps to the tick and is at most one tick stale, which is
+ * where it was already.
+ */
+function conjunctionFrame() {
+  requestAnimationFrame(conjunctionFrame);
+  const pair = state.conjunction;
+  if (!pair || !state.time.playing) return;
+
+  advanceClock();
+  for (const id of [pair.aId, pair.bId]) {
+    const sat = state.sats.find((s) => s.id === id);
+    if (sat) updatePosition(sat, state.time.current);
+  }
+  // The range readout hangs off the two positions that just moved.
+  computeConjunctionRange();
+
+  if (activeView) activeView.render(state);
+}
+
+function tick() {
+  advanceClock();
   computePositions(state.time.current);
   computePlaneRings(state.time.current);
   computeTracks(state.time.current);
@@ -619,6 +689,16 @@ async function main() {
       refreshDerived();
       ui.renderClock();
     },
+    // Relative, unlike setOffsetMinutes below: the arrow keys nudge the clock
+    // from wherever it has run to, and an offset measured from real now would
+    // drag it back to the scrubber's idea of the time on every press.
+    nudgeTime: (ms) => {
+      state.time.simMs += ms;
+      clampOffset();
+      state.time.current = new Date(state.time.simMs);
+      refreshDerived();
+      ui.renderClock();
+    },
     setOffsetMinutes: (minutes) => {
       state.time.simMs = Date.now() + minutes * 60000;
       state.time.current = new Date(state.time.simMs);
@@ -748,6 +828,7 @@ async function main() {
   lastFrameMs = performance.now();
   tick();
   setInterval(tick, TICK_MS);
+  requestAnimationFrame(conjunctionFrame);
   setInterval(ui.renderStatus, 60000);
 
   // For poking at live state from the browser console.
