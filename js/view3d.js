@@ -42,6 +42,72 @@ const CESIUM_BASE = `https://cesium.com/downloads/cesiumjs/releases/${CESIUM_VER
 // 11-sided polygon.
 const RING_ARC_STEPS = 8;
 
+// Orbit paths, following the map's ground track. How much orbit they cover is
+// settled where the track is built, in app.js - the array holds exactly what is
+// drawn - and where the satellite sits in that array comes with it, so the two
+// halves meet on the mark rather than near it.
+//
+// A polyline carries one colour, so each band is its own entity. Eight a side
+// is fewer than the map uses: a band on the globe is foreshortened, and past
+// the limb it is not visible at all.
+const TRACK_BANDS = 8;
+const TRACK_ALPHA_AHEAD = 0.95;
+const TRACK_ALPHA_BEHIND = 0.9;
+// Shapes the fade along each side. Below 1 the line holds most of its
+// brightness through the stretch next to the satellite and spends the drop at
+// the far end, which is where it is wanted; above 1 it does the opposite and
+// is half gone by the middle of its own span.
+const TRACK_FADE_POWER = 0.8;
+
+// The flown stretch is solid: a bright core inside a wider, translucent sheath
+// of the same colour - the globe's version of the trail the map draws under
+// its track. A flat polyline in perspective reads as a decal on the screen: it
+// has no depth, and the sphere behind it has plenty.
+//
+// It is not Cesium's glow material, which was the obvious thing to reach for
+// and is wrong here. That shader adds the same glow term to all three channels
+// at the centre of the line, so the core saturates to white however it is
+// coloured - and on this map the colour is the satellite's identity. A violet
+// orbit came out white with a violet edge.
+//
+// WIDTH_BEHIND is the whole line, core and sheath together; CORE_PX is the
+// part of it that is solid.
+const TRACK_WIDTH_BEHIND = 5.5;
+const TRACK_CORE_PX = 1.8;
+const TRACK_HALO_ALPHA = 0.22;
+
+// The stretch to come is dashed, with its gaps filled in the same colour at a
+// fraction of the alpha rather than left empty. Same idea as the sheath - the
+// dashes carry the reading, the fill carries the continuity - and it costs
+// nothing, since a dash material draws its own gaps either way. Without it the
+// longer half of the line would be the flat dashed polyline the sheath above
+// exists to get away from.
+const TRACK_WIDTH_AHEAD = 2.5;
+const TRACK_GAP_ALPHA = 0.18;
+// Both sides taper to this at the end of their span.
+const TRACK_WIDTH_END = 1;
+
+/**
+ * How lit a band is: 1 next to the satellite, 0 at the end of its side's span.
+ * Bands run outward from the satellite, the flown ones first.
+ */
+function trackBandFade(band) {
+  const u = ((band % TRACK_BANDS) + 0.5) / TRACK_BANDS;
+  return (1 - u) ** TRACK_FADE_POWER;
+}
+
+/** Alpha and width for a band, from its side and its distance out. */
+function trackBandStyle(band) {
+  const ahead = band >= TRACK_BANDS;
+  const fade = trackBandFade(band);
+  const full = ahead ? TRACK_WIDTH_AHEAD : TRACK_WIDTH_BEHIND;
+  return {
+    ahead,
+    alpha: (ahead ? TRACK_ALPHA_AHEAD : TRACK_ALPHA_BEHIND) * fade,
+    width: TRACK_WIDTH_END + (full - TRACK_WIDTH_END) * fade,
+  };
+}
+
 // The terminator: the circle 90 degrees from the subsolar point. Sampled every
 // few degrees, floated just above the surface so it cannot z-fight the globe,
 // and drawn far brighter than the map's version - on a shaded sphere the line
@@ -75,8 +141,18 @@ const PAIR_STANDOFF_RATIO = 3;
 // miss pulls the camera back until the Earth is a marble again.
 const PAIR_STANDOFF_MIN_M = 40000;
 const PAIR_STANDOFF_MAX_M = 4000000;
-const PAIR_LINE_WIDTH = 2.5;
-const PAIR_DASH_PATTERN = 0b1110011100111001;
+// The range line is a dimension line, as on the map: a fine solid rule with a
+// tick across it at each end. It was dashed, which reads as provisional - and
+// this is the one quantity on the globe that is measured rather than predicted.
+// The orbit tracks have since taken dashes for the stretch still to come, so a
+// dashed line between two marks would now say the same thing as a piece of
+// orbit running past them.
+const PAIR_LINE_WIDTH = 2;
+// Half a tick's length, in pixels, matching the map's. Sized on screen rather
+// than in space because it is an annotation: a two kilometre miss and a two
+// hundred kilometre one get the same end stop, and it does not grow as the
+// camera closes on the pair.
+const PAIR_TICK_PX = 5;
 // The range box: its own padding, and the clearance it keeps from the line it
 // measures. Plain numbers, not Cartesian2s - this module is evaluated before
 // Cesium is fetched.
@@ -228,6 +304,7 @@ export async function create3DView(container, handlers = {}) {
   const trackEntities = [];
   let terminatorEntity = null;
   let pairEntity = null;
+  let pairTickEntities = [];
   let pairLabelEntity = null;
   // The satellite the camera is currently pivoting about, if any. Held by id so
   // the pivot can be released without caring whether the entity still exists.
@@ -292,14 +369,75 @@ export async function create3DView(container, handlers = {}) {
     return ring._positions3d;
   };
 
-  const trackPositions = (i) => {
+  /**
+   * One orbit cut into TRACK_BANDS runs end to end, cached on the track it came
+   * from - the same trick ringPositions() uses, and needed for the same reason.
+   * The polylines poll for their positions every frame, while the tracks behind
+   * them are rebuilt a few times a second; without the cache this would rebuild
+   * six hundred Cartesians ten times over, sixty times a second.
+   *
+   * Each run keeps the sample the next one starts from, or the orbit would show
+   * a gap at every step in the fade.
+   */
+  const trackBands = (track) => {
+    if (track._bands3d) return track._bands3d;
+    const points = track.points;
+    const now = track.nowIndex;
+
+    track._bands3d = Array.from({ length: TRACK_BANDS * 2 }, (_, band) => {
+      const ahead = band >= TRACK_BANDS;
+      const step = band % TRACK_BANDS;
+      // Each side is measured in its own samples, out from the satellite.
+      const reach = ahead ? (points.length - 1 - now) : now;
+      const near = (step / TRACK_BANDS) * reach;
+      const far = ((step + 1) / TRACK_BANDS) * reach;
+
+      // Rounding outward at both ends is what makes a band overlap its
+      // neighbours; without that the orbit shows a gap at every step.
+      const from = Math.max(0, Math.floor(ahead ? now + near : now - far));
+      const to = Math.min(points.length, Math.ceil(ahead ? now + far : now - near) + 1);
+      const run = points.slice(from, to);
+      if (run.length < 2) return [];
+
+      // Each sample carries its altitude, so this traces the orbit itself, not
+      // its shadow on the ground.
+      return Cesium.Cartesian3.fromDegreesArrayHeights(
+        run.flatMap(([lat, lon, altKm]) => [lon, lat, altKm * 1000]),
+      );
+    });
+    return track._bands3d;
+  };
+
+  const trackPositions = (i, band) => {
     const track = current && current.tracks && current.tracks[i];
     if (!track || track.points.length < 2) return [];
-    // Each sample carries its altitude, so this traces the orbit itself, not
-    // its shadow on the ground.
-    return Cesium.Cartesian3.fromDegreesArrayHeights(
-      track.points.flatMap(([lat, lon, altKm]) => [lon, lat, altKm * 1000]),
-    );
+    return trackBands(track)[band];
+  };
+
+  /**
+   * The material for one band: a dash ahead of the satellite, a sheathed solid
+   * line behind it.
+   *
+   * Rebuilt only when a slot changes colour - a material is an allocation and
+   * the caller runs five times a second.
+   */
+  const trackMaterial = (band, cssColor) => {
+    const { ahead, alpha, width } = trackBandStyle(band);
+    const color = Cesium.Color.fromCssColorString(cssColor);
+    if (ahead) {
+      return new Cesium.PolylineDashMaterialProperty({
+        color: color.withAlpha(alpha),
+        gapColor: color.withAlpha(alpha * TRACK_GAP_ALPHA),
+      });
+    }
+
+    // outlineWidth is the whole sheath, both sides together, so what is left
+    // of the line's width is the solid core.
+    return new Cesium.PolylineOutlineMaterialProperty({
+      color: color.withAlpha(alpha),
+      outlineColor: color.withAlpha(alpha * TRACK_HALO_ALPHA),
+      outlineWidth: Math.max(0, width - TRACK_CORE_PX),
+    });
   };
 
   /**
@@ -328,6 +466,10 @@ export async function create3DView(container, handlers = {}) {
   // depthTestAgainstTerrain globally would z-fight the footprints and site
   // markers sitting at ground level.
   const occluder = new Cesium.EllipsoidalOccluder(viewer.scene.globe.ellipsoid);
+  /** Whether a satellite is one of the two ends of the active approach. */
+  const isPaired = (id) => Boolean(current && current.conjunction
+    && (current.conjunction.aId === id || current.conjunction.bId === id));
+
   /** The two ends of the active conjunction, at the altitudes they fly. */
   const pairEnds = () => {
     const pair = current && current.conjunction;
@@ -357,6 +499,70 @@ export async function create3DView(container, handlers = {}) {
     const points = pairPositions();
     if (points.length < 2) return Cesium.Cartesian3.ZERO;
     return Cesium.Cartesian3.midpoint(points[0], points[1], new Cesium.Cartesian3());
+  };
+
+  const scratchTickDir = new Cesium.Cartesian3();
+  const scratchTickAcross = new Cesium.Cartesian3();
+  const scratchTickEye = new Cesium.Cartesian3();
+  const scratchTickPixel = new Cesium.Cartesian2();
+
+  /**
+   * A tick across the line at one of its ends.
+   *
+   * Square to the line and to the line of sight to this end of it, which puts
+   * it in the plane facing the camera: it reads as a tick from wherever the
+   * pair is being watched, and both its ends are the same distance away, so it
+   * draws its full length instead of running off into depth. Square to the
+   * line alone it would be a ring of possible directions, and whichever was
+   * picked would foreshorten to nothing as the camera came round to it.
+   *
+   * The line of sight has to be taken from the camera's world position, not
+   * from camera.direction. While an approach is framed the camera is tracking
+   * one of the pair, and a tracked camera reports its direction in the tracked
+   * entity's own frame - so crossing it with a world-space line gives a
+   * direction that means nothing. Pointed near enough along the view axis, the
+   * two ends of the tick land at very different depths and perspective draws
+   * the few pixels between them as a streak across the whole globe. It grew
+   * with the separation, because the tick grows with it, so it only showed
+   * well away from the closest approach.
+   *
+   * @param {number} end 0 for the near end of the line, 1 for the far one.
+   */
+  const pairTick = (end) => () => {
+    const points = pairPositions();
+    if (points.length < 2) return [];
+
+    const dir = Cesium.Cartesian3.subtract(points[1], points[0], scratchTickDir);
+    if (Cesium.Cartesian3.magnitude(dir) < 1) return [];
+    Cesium.Cartesian3.normalize(dir, dir);
+
+    const at = points[end];
+    const eye = Cesium.Cartesian3.subtract(viewer.camera.positionWC, at, scratchTickEye);
+    const distance = Cesium.Cartesian3.magnitude(eye);
+    if (!(distance > 0)) return [];
+
+    const across = Cesium.Cartesian3.cross(dir, eye, scratchTickAcross);
+    // The pair seen exactly end-on: the line is a point and there is no across.
+    if (Cesium.Cartesian3.magnitude(across) < 1e-6) return [];
+    Cesium.Cartesian3.normalize(across, across);
+
+    // What a pixel is worth in metres at this end's own distance, so the two
+    // ticks come out the same length on screen however much perspective there
+    // is between them. The frustum knows its own field of view and aspect,
+    // which is the whole of that sum.
+    const pixel = viewer.camera.frustum.getPixelDimensions(
+      viewer.scene.drawingBufferWidth,
+      viewer.scene.drawingBufferHeight,
+      distance,
+      viewer.scene.pixelRatio,
+      scratchTickPixel,
+    );
+    Cesium.Cartesian3.multiplyByScalar(across, pixel.y * PAIR_TICK_PX, across);
+
+    return [
+      Cesium.Cartesian3.subtract(at, across, new Cesium.Cartesian3()),
+      Cesium.Cartesian3.add(at, across, new Cesium.Cartesian3()),
+    ];
   };
 
   // Text metrics for the range box. Cesium lays a label out on the GPU and does
@@ -597,8 +803,9 @@ export async function create3DView(container, handlers = {}) {
 
       const spare = sat.status === 'spare';
       const hovered = hoverSatId === sat.id;
+      const paired = isPaired(sat.id);
       const mark = markTexture({
-        color: cssColor, spare, selected, hovered, ringed: highlighted || hovered,
+        color: cssColor, spare, selected, hovered, paired, ringed: highlighted || hovered,
       });
 
       if (!entity) {
@@ -730,17 +937,23 @@ export async function create3DView(container, handlers = {}) {
     // objects at altitude and the quantity being drawn is the distance between
     // them, which is a chord. ArcType.NONE is what keeps it one.
     if (!pairEntity) {
-      pairEntity = viewer.entities.add({
+      const rule = (positions) => ({
         polyline: {
-          positions: new Cesium.CallbackProperty(pairPositions, false),
+          positions: new Cesium.CallbackProperty(positions, false),
           width: PAIR_LINE_WIDTH,
           arcType: Cesium.ArcType.NONE,
-          material: new Cesium.PolylineDashMaterialProperty({
-            color: Cesium.Color.fromCssColorString(MAP_COLORS.conjunction),
-            dashPattern: PAIR_DASH_PATTERN,
-          }),
+          material: new Cesium.ColorMaterialProperty(
+            Cesium.Color.fromCssColorString(MAP_COLORS.conjunction),
+          ),
         },
       });
+      pairEntity = viewer.entities.add(rule(pairPositions));
+      // The ticks are their own polylines. One polyline through both would draw
+      // the jump between them, which is the line they are already ending.
+      pairTickEntities = [
+        viewer.entities.add(rule(pairTick(0))),
+        viewer.entities.add(rule(pairTick(1))),
+      ];
       pairLabelEntity = viewer.entities.add({
         position: new Cesium.CallbackProperty(pairMidpoint, false),
         label: {
@@ -770,6 +983,7 @@ export async function create3DView(container, handlers = {}) {
     const pair = pairEnds();
     pairEntity.show = Boolean(pair);
     pairLabelEntity.show = Boolean(pair);
+    for (const tick of pairTickEntities) tick.show = Boolean(pair);
     if (pair) {
       const css = conjunctionColor(pair.rangeKm);
       // Only when the band actually changes. This runs five times a second and
@@ -777,9 +991,9 @@ export async function create3DView(container, handlers = {}) {
       if (pairEntity._pairColor !== css) {
         pairEntity._pairColor = css;
         const color = Cesium.Color.fromCssColorString(css);
-        pairEntity.polyline.material = new Cesium.PolylineDashMaterialProperty({
-          color, dashPattern: PAIR_DASH_PATTERN,
-        });
+        for (const line of [pairEntity, ...pairTickEntities]) {
+          line.polyline.material = new Cesium.ColorMaterialProperty(color);
+        }
         pairLabelEntity.label.fillColor = color;
       }
       const text = pair.rangeKm < 10
@@ -796,31 +1010,32 @@ export async function create3DView(container, handlers = {}) {
     // No seam handling needed in 3D. A pool grown to fit, like the link lines:
     // with a conjunction up there are two of these, and the count changes as
     // the selection does.
+    // One polyline per band per track, both sides, so the pool runs
+    // TRACK_BANDS * 2 entities for every orbit on screen. A slot's band never
+    // changes, so its width is settled once, when the slot is made.
+    const perTrack = TRACK_BANDS * 2;
     const tracks = state.tracks || [];
-    while (trackEntities.length < tracks.length) {
-      const i = trackEntities.length;
+    while (trackEntities.length < tracks.length * perTrack) {
+      const i = Math.floor(trackEntities.length / perTrack);
+      const band = trackEntities.length % perTrack;
       trackEntities.push(viewer.entities.add({
         polyline: {
-          positions: new Cesium.CallbackProperty(() => trackPositions(i), false),
-          width: 2,
+          positions: new Cesium.CallbackProperty(() => trackPositions(i, band), false),
+          width: trackBandStyle(band).width,
           // NONE, not GEODESIC: geodesic arcs drape onto the ellipsoid,
           // which would flatten the orbit onto the surface.
           arcType: Cesium.ArcType.NONE,
-          material: new Cesium.PolylineDashMaterialProperty({ color: Cesium.Color.WHITE }),
+          material: trackMaterial(band, MAP_COLORS.selection),
         },
       }));
     }
-    trackEntities.forEach((entity, i) => {
-      const track = tracks[i];
+    trackEntities.forEach((entity, slot) => {
+      const track = tracks[Math.floor(slot / perTrack)];
       entity.show = Boolean(track);
       if (!track) return;
-      // Only when this slot changes colour - a material is an allocation and
-      // this runs five times a second.
       if (entity._trackColor !== track.color) {
         entity._trackColor = track.color;
-        entity.polyline.material = new Cesium.PolylineDashMaterialProperty({
-          color: Cesium.Color.fromCssColorString(track.color),
-        });
+        entity.polyline.material = trackMaterial(slot % perTrack, track.color);
       }
     });
 

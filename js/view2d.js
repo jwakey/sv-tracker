@@ -61,6 +61,59 @@ const DOT_MARGIN_PX = 90;
 const FOOTPRINT_ALPHA_MAX = 0.15;
 const FOOTPRINT_SELECTED_ALPHA_MAX = 2 / 3;
 
+// Ground track. How much orbit it covers is settled where the track is built,
+// in app.js - the array holds exactly what is drawn, no more - so what is left
+// here is how it is drawn. It fades to nothing at both ends rather than
+// stopping: a line that stops dead in open ocean reads as a clipping artefact.
+
+// Flown and still to come are told apart the way a route is: the stretch
+// already covered is solid, the stretch to come is dashed. That is the older
+// convention and the right way round - where a satellite has been is not in
+// question, and where it is going is an extrapolation, which is what a broken
+// line has always meant. It is a difference of line style rather than of hue,
+// because the colour is the satellite's identity and cannot also carry time.
+//
+// The stretch ahead keeps the brighter of the two alphas even so. It is the
+// longer half and the one worth reading, and a dashed line lays down less ink
+// than a solid one at the same alpha - so matching them there would leave the
+// half that matters looking like the fainter of the two.
+const TRACK_DASH_AHEAD = [2.5, 3.5];
+const TRACK_ALPHA_AHEAD = 0.95;
+const TRACK_ALPHA_BEHIND = 0.85;
+const TRACK_WIDTH_AHEAD = 1.5;
+const TRACK_WIDTH_BEHIND = 1.6;
+// Both sides taper to this at the end of their span.
+const TRACK_WIDTH_END = 0.7;
+
+// Canvas carries one alpha and one width per stroke, so the fade is quantised
+// into bands per side, each drawn in a single pass. Ten is past the point
+// where the steps show over a span this short.
+const TRACK_BANDS = 10;
+// Shapes the fade along each side. Below 1 the line holds most of its
+// brightness through the stretch next to the satellite and spends the drop at
+// the far end, which is where it is wanted; above 1 it does the opposite and
+// is half gone by the middle of its own span.
+const TRACK_FADE_POWER = 0.8;
+
+// A soft continuous trail under the line, at a fraction of its alpha and a
+// multiple of its width. It is what keeps a thin line from looking like a
+// screen artefact: the line carries the reading, the trail carries the weight.
+// Both taper together, so the trail never outlives the line it backs.
+const TRACK_TRAIL_SCALE = 3;
+const TRACK_TRAIL_ALPHA = 0.1;
+
+/**
+ * Which band a sample belongs to.
+ *
+ * Bands run outward from the satellite on each side: 0 to TRACK_BANDS-1 over
+ * the stretch already flown, TRACK_BANDS up over the stretch to come.
+ */
+function trackBandAt(phase) {
+  const ahead = phase >= 0;
+  const step = Math.min(TRACK_BANDS - 1, Math.floor(Math.abs(phase) * TRACK_BANDS));
+  return (ahead ? TRACK_BANDS : 0) + step;
+}
+
 // Wheel zoom. PX_PER_LEVEL is the trackpad travel for one zoom level, TAU_MS
 // how fast the map catches up to where the wheel asked for. The easing is for
 // notched mice, which arrive as one jump per detent; trackpad deltas are small
@@ -93,8 +146,20 @@ const PAIR_SPAN_FRACTION = 0.3;
 const PAIR_MIN_ZOOM = 4;
 
 // Range line and its label.
-const PAIR_LINE_WIDTH = 1.6;
-const PAIR_DASH = [5, 4];
+//
+// Drawn as a dimension line, the way a measurement is annotated on a drawing:
+// a fine solid rule with a tick across it at each end. It used to be dashed,
+// which is wrong twice over. A dash reads as something provisional, and this is
+// the one quantity on the map that is measured rather than predicted; and since
+// the orbit tracks took up dashes for the stretch a satellite has yet to fly,
+// a dashed line between two marks now says the same thing as a piece of orbit
+// running past them. The ticks are what make it a measurement: they
+// state which two points the number belongs to.
+const PAIR_LINE_WIDTH = 1.4;
+// Half the tick's length. Long enough to read as a deliberate end stop at the
+// zoom an approach is watched from, short enough not to be mistaken for the
+// mark's own ring at any other.
+const PAIR_TICK_PX = 5;
 // Clearance the range box keeps from the line it measures. Not the whole
 // offset: labelOffsetAcross() adds the box's own half-size on each axis, so
 // this is the gap that actually shows.
@@ -258,6 +323,9 @@ export function create2DView(container, handlers = {}) {
         id: sat.id, lat: pos.lat, lon: pos.lon, color, selected, highlighted,
         ahead: highlighted ? pos.ahead : null,
         spare: sat.status === 'spare', label: sat.label,
+        // Both ends of an approach are drawn at one size - see markRadius().
+        paired: Boolean(st.conjunction
+          && (st.conjunction.aId === sat.id || st.conjunction.bId === sat.id)),
       });
     }
 
@@ -286,8 +354,11 @@ export function create2DView(container, handlers = {}) {
     }
 
     const trackPaths = (st.tracks || [])
-      .map((t) => ({ color: t.color, segments: splitAtAntimeridian(t.points).map(boundPath) }))
-      .filter((t) => t.segments.length);
+      .map((t) => ({
+        color: t.color,
+        bands: bandTrack(splitAtAntimeridian(withTrackPhase(t.points, t.nowIndex))),
+      }))
+      .filter((t) => t.bands.some((paths) => paths.length));
 
     return {
       footprints,
@@ -541,19 +612,49 @@ export function create2DView(container, handlers = {}) {
     ctx.globalAlpha = 1;
   }
 
+  /**
+   * The ground track: a line on a soft trail, solid behind the satellite and
+   * dashed ahead of it, fading out at both ends.
+   *
+   * Each band is traced once and stroked twice - canvas keeps the current path
+   * after a stroke - so the trail and the line share one projection pass. Dash
+   * phase restarts at each band, which a dash this fine does not show.
+   */
   function drawGroundTrack(view, f) {
     const { ctx } = view;
     if (!f.trackPaths.length) return;
-    ctx.lineWidth = 1.4;
-    ctx.globalAlpha = 0.85;
-    ctx.setLineDash([4, 4]);
+
     // Each track in its own satellite's colour, so a pair of them reads as two
     // orbits rather than one crossing itself.
+    ctx.lineCap = 'round';
     for (const track of f.trackPaths) {
       ctx.strokeStyle = track.color;
-      if (tracePaths(view, track.segments, false)) ctx.stroke();
+      for (let band = 0; band < track.bands.length; band += 1) {
+        const paths = track.bands[band];
+        if (!paths.length || !tracePaths(view, paths, false)) continue;
+
+        const ahead = band >= TRACK_BANDS;
+        // Middle of the band as a fraction of its side's span: 0 at the
+        // satellite, 1 where the line runs out.
+        const u = ((band % TRACK_BANDS) + 0.5) / TRACK_BANDS;
+        const fade = (1 - u) ** TRACK_FADE_POWER;
+        const alpha = (ahead ? TRACK_ALPHA_AHEAD : TRACK_ALPHA_BEHIND) * fade;
+        const full = ahead ? TRACK_WIDTH_AHEAD : TRACK_WIDTH_BEHIND;
+        const width = TRACK_WIDTH_END + (full - TRACK_WIDTH_END) * fade;
+
+        ctx.setLineDash([]);
+        ctx.globalAlpha = alpha * TRACK_TRAIL_ALPHA;
+        ctx.lineWidth = width * TRACK_TRAIL_SCALE;
+        ctx.stroke();
+
+        if (ahead) ctx.setLineDash(TRACK_DASH_AHEAD);
+        ctx.globalAlpha = alpha;
+        ctx.lineWidth = width;
+        ctx.stroke();
+      }
     }
     ctx.setLineDash([]);
+    ctx.lineCap = 'butt';
     ctx.globalAlpha = 1;
   }
 
@@ -616,17 +717,33 @@ export function create2DView(container, handlers = {}) {
     ctx.fill();
   }
 
-  /** The range line joining a paired satellites. */
+  /** The range line joining a pair, with a tick across it at each mark. */
   function drawPairLine(view, f) {
     if (!f.pair) return;
     const { ctx } = view;
 
     ctx.strokeStyle = f.pair.color;
     ctx.lineWidth = PAIR_LINE_WIDTH;
-    ctx.setLineDash(PAIR_DASH);
     ctx.globalAlpha = 0.95;
+    ctx.lineCap = 'round';
     if (tracePaths(view, f.pair.segments, false)) ctx.stroke();
-    ctx.setLineDash([]);
+
+    // The ticks are drawn in screen space off the line's own direction, so they
+    // stay square to it however the pair happens to lie - and stay the same
+    // length whatever the zoom, since they are an annotation rather than
+    // anything with a size on the ground.
+    const ends = pairScreen(view, f.pair);
+    if (ends) {
+      const [nx, ny] = ends.across;
+      ctx.beginPath();
+      ctx.moveTo(ends.ax - nx, ends.ay - ny);
+      ctx.lineTo(ends.ax + nx, ends.ay + ny);
+      ctx.moveTo(ends.bx - nx, ends.by - ny);
+      ctx.lineTo(ends.bx + nx, ends.by + ny);
+      ctx.stroke();
+    }
+
+    ctx.lineCap = 'butt';
     ctx.globalAlpha = 1;
   }
 
@@ -652,16 +769,13 @@ export function create2DView(container, handlers = {}) {
     const my = proj.y(midLat);
     if (!onCanvas(mx, my, view)) return;
 
-    // Screen-space direction of the line, from the two ends. The far end is
-    // brought back alongside the near one first: a pair straddling the seam has
-    // longitudes 358 degrees apart, and taken raw the direction would run the
-    // long way round the map and throw the box out sideways.
-    let lonB = f.pair.b[1];
-    if (lonB - f.pair.a[1] > 180) lonB -= 360;
-    if (lonB - f.pair.a[1] < -180) lonB += 360;
-
-    const dx = proj.x(lonB) - proj.x(f.pair.a[1]);
-    const dy = proj.y(f.pair.b[0]) - proj.y(f.pair.a[0]);
+    // Screen-space direction of the line, from the two ends. A pair the
+    // projection puts on a single point has no direction to stand clear of,
+    // and labelOffsetAcross falls back to straight up - which is exactly the
+    // case that must not lose its readout, since it is the closest approach.
+    const ends = pairScreen(view, f.pair);
+    const dx = ends ? ends.bx - ends.ax : 0;
+    const dy = ends ? ends.by - ends.ay : 0;
 
     const km = f.pair.rangeKm;
     const text = `${km < 10 ? km.toFixed(2) : km.toFixed(1)} km`;
@@ -709,7 +823,9 @@ export function create2DView(container, handlers = {}) {
       const y = proj.y(dot.lat);
       if (!onCanvas(x, y, view)) continue;
       const hovered = hoverSatId === dot.id;
-      const r = markRadius({ selected: dot.selected, hovered, spare: dot.spare }) * scale;
+      const r = markRadius({
+        selected: dot.selected, hovered, spare: dot.spare, paired: dot.paired,
+      }) * scale;
 
       // The globe draws the same mark, from the same function - see
       // markTexture() in symbology.js.
@@ -748,7 +864,7 @@ export function create2DView(container, handlers = {}) {
       if (!onCanvas(px, py, view)) continue;
       // Measured off the edge of the mark, not its centre, so the gap stays
       // even as the marks grow.
-      const r = markRadius({ selected: dot.selected, spare: dot.spare }) * scale;
+      const r = markRadius({ selected: dot.selected, spare: dot.spare, paired: dot.paired }) * scale;
       const x = px + r + (SAT_KNOCKOUT_PX + LABEL_GAP_PX) * scale;
       ctx.strokeText(dot.label, x, py);
       // The satellite's own colour, unadjusted: a label belongs to its mark and
@@ -1001,6 +1117,96 @@ function boundPath(points) {
     if (lon > maxLon) maxLon = lon;
   }
   return { points, bbox: { minLat, maxLat, minLon, maxLon } };
+}
+
+/**
+ * A pair's two ends in screen space, with the unit perpendicular to the line
+ * between them already scaled to the tick length.
+ *
+ * The far end is brought back alongside the near one before projecting: a pair
+ * straddling the seam has longitudes 358 degrees apart, and taken raw the line
+ * runs the long way round the map - which squares the ticks to the wrong
+ * direction and throws the label box out sideways.
+ *
+ * @returns {{ax: number, ay: number, bx: number, by: number,
+ *   across: [number, number]} | null} null when the projection puts both ends
+ *   on one point, which has no direction to take a perpendicular to.
+ */
+function pairScreen(view, pair) {
+  const { proj } = view;
+  let lonB = pair.b[1];
+  if (lonB - pair.a[1] > 180) lonB -= 360;
+  if (lonB - pair.a[1] < -180) lonB += 360;
+
+  const ax = proj.x(pair.a[1]);
+  const ay = proj.y(pair.a[0]);
+  const bx = proj.x(lonB);
+  const by = proj.y(pair.b[0]);
+
+  const len = Math.hypot(bx - ax, by - ay);
+  if (len < 1e-6) return null;
+  return {
+    ax,
+    ay,
+    bx,
+    by,
+    across: [(-(by - ay) / len) * PAIR_TICK_PX, ((bx - ax) / len) * PAIR_TICK_PX],
+  };
+}
+
+/**
+ * Tag each ground-track sample with how far along the track it is and which
+ * way: 0 at the satellite, -1 at the start of what was flown, +1 at the far end
+ * of what is to come. groundTrack() reports where the satellite itself sits in
+ * the array, which is the one sample this cannot be wrong about - work it out
+ * from the array's length instead and the track misses its own satellite by
+ * however far the span failed to divide by the step.
+ *
+ * It rides in the third component, where the altitude sits in the array the
+ * globe reads, so splitAtAntimeridian() interpolates it at the crossing along
+ * with the latitude and the fade survives the seam. This maps into a new
+ * array, so the altitudes the globe needs are untouched - the map has no use
+ * for them.
+ */
+function withTrackPhase(points, nowIndex) {
+  // Each side is normalised by its own length, so the phase is -1 at the start
+  // of the track, 0 exactly on the satellite and +1 at the end - whatever
+  // share of a revolution either side happens to be.
+  const behind = Math.max(1, nowIndex);
+  const ahead = Math.max(1, points.length - 1 - nowIndex);
+  return points.map(([lat, lon], i) => [
+    lat, lon, (i - nowIndex) / (i < nowIndex ? behind : ahead),
+  ]);
+}
+
+/**
+ * Sort a track's seam segments into one bucket of paths per fade band, so a
+ * band can be drawn in one stroke instead of a stroke per sample.
+ *
+ * A band holds more than one path: the seam cuts the track, and the phase is
+ * symmetric, so every band appears once each side of the satellite.
+ *
+ * Each run keeps the sample the next one starts from - without that overlap
+ * the line would show a gap at every step in the fade.
+ */
+function bandTrack(segments) {
+  const bands = Array.from({ length: TRACK_BANDS * 2 }, () => []);
+
+  for (const points of segments) {
+    let start = 0;
+    let band = trackBandAt(points[0][2]);
+    for (let i = 1; i < points.length; i += 1) {
+      const next = trackBandAt(points[i][2]);
+      if (next === band) continue;
+      // Ending one sample into the next band is what makes the run overlap it;
+      // without that the line would show a gap at every step in the fade.
+      bands[band].push(boundPath(points.slice(start, i + 1)));
+      start = i;
+      band = next;
+    }
+    if (points.length - start > 1) bands[band].push(boundPath(points.slice(start)));
+  }
+  return bands;
 }
 
 /** Does a lat/lon box reach the part of the world the canvas covers? */

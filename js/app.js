@@ -386,6 +386,24 @@ function computePlaneRings(date) {
   }
 }
 
+// How much of the orbit is drawn, in revolutions either side of the satellite.
+// Ahead gets about twice what behind gets: where a satellite is going is the
+// question the track is there to answer, and where it has been is context.
+// Both views fade their end of it out to nothing, so these are also the point
+// at which the line disappears rather than a hard edge.
+//
+// It used to be a full revolution each way and the views drew all of it, which
+// at any zoom past the whole Earth is a line long past the point of saying
+// anything about where the satellite is.
+const TRACK_BEHIND_REVS = 0.28;
+const TRACK_AHEAD_REVS = 0.55;
+// Ten seconds, where the whole revolution was sampled at twenty. The samples
+// are the corners of a polyline: at 20 s they sit 150 km apart, and the chord
+// between two of them cuts about 400 m inside the curve it stands for - which
+// is visible at the zoom a close approach is watched from. Halving the step
+// quarters that, to about 100 m, and the shorter span above pays for it.
+const TRACK_STEP_SEC = 10;
+
 /**
  * Orbit tracks: the selection, and both halves of an active conjunction.
  *
@@ -393,10 +411,10 @@ function computePlaneRings(date) {
  * constellation member, which is already one of the pair - and drawing the same
  * orbit twice would double its opacity for no reason.
  *
- * Each track is a full revolution either side of now at a 20 second step, so
- * this is a few hundred propagations per satellite per tick. That is why it is
- * confined to satellites someone is actually looking at rather than run for the
- * whole constellation.
+ * Each track is TRACK_BEHIND_REVS + TRACK_AHEAD_REVS of a revolution at a ten
+ * second step, so this is a few hundred propagations per satellite per tick.
+ * That is why it is confined to satellites someone is actually looking at
+ * rather than run for the whole constellation.
  */
 function computeTracks(date) {
   state.tracks = [];
@@ -411,9 +429,13 @@ function computeTracks(date) {
   for (const id of wanted) {
     const sat = state.sats.find((s) => s.id === id);
     if (!sat) continue;
-    const points = groundTrack(sat.satrec, date, 20);
+    const { points, nowIndex } = groundTrack(sat.satrec, date, {
+      stepSec: TRACK_STEP_SEC,
+      behindRevs: TRACK_BEHIND_REVS,
+      aheadRevs: TRACK_AHEAD_REVS,
+    });
     if (points.length > 1) {
-      state.tracks.push({ id, points, color: satColor(sat, state.planes) });
+      state.tracks.push({ id, points, nowIndex, color: satColor(sat, state.planes) });
     }
   }
 }

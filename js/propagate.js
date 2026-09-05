@@ -123,21 +123,36 @@ export function argumentOfLatitude(satrec, date) {
 }
 
 /**
- * The satellite's path for one orbit either side of `date`.
+ * The satellite's path either side of `date`, in revolutions.
  *
- * @returns {Array<[number, number, number]>} [lat, lon, altKm] samples. The 2D
- * map uses lat/lon and draws a ground track; the globe uses the altitude too
- * and draws the orbit itself.
+ * Samples step outward from `date` itself, so `points[nowIndex]` is the
+ * satellite's own position and the two halves of the track meet exactly on its
+ * mark. Counting in from one end instead leaves the middle sample wherever the
+ * span happens to divide by the step - up to half a step out, which at orbital
+ * speed is tens of kilometres, and shows up at close zoom as a track that
+ * misses the satellite it belongs to.
+ *
+ * @returns {{points: Array<[number, number, number]>, nowIndex: number}}
+ *   [lat, lon, altKm] samples. The 2D map uses lat/lon and draws a ground
+ *   track; the globe uses the altitude too and draws the orbit itself.
  */
-export function groundTrack(satrec, date, stepSec = 20) {
-  const halfSpanSec = periodMinutes(satrec) * 60;
-  const points = [];
+export function groundTrack(satrec, date, { stepSec = 20, behindRevs = 1, aheadRevs = 1 } = {}) {
+  const periodSec = periodMinutes(satrec) * 60;
+  const behind = Math.round((periodSec * behindRevs) / stepSec);
+  const ahead = Math.round((periodSec * aheadRevs) / stepSec);
 
-  for (let dt = -halfSpanSec; dt <= halfSpanSec; dt += stepSec) {
-    const pos = propagateSat(satrec, new Date(date.getTime() + dt * 1000));
-    if (pos) points.push([pos.lat, pos.lon, pos.altKm]);
+  const points = [];
+  let nowIndex = 0;
+  for (let k = -behind; k <= ahead; k += 1) {
+    const pos = propagateSat(satrec, new Date(date.getTime() + k * stepSec * 1000));
+    // A sample SGP4 could not produce would slide every later one down a place,
+    // so where now sits is counted from what actually landed in the array
+    // rather than worked out from its length.
+    if (!pos) continue;
+    if (k <= 0) nowIndex = points.length;
+    points.push([pos.lat, pos.lon, pos.altKm]);
   }
-  return points;
+  return { points, nowIndex };
 }
 
 /**

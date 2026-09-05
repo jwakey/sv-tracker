@@ -80,7 +80,14 @@ export function markScale(zoom) {
 }
 
 /** Unscaled radius for a mark in a given state. Hover only shows in 2D. */
-export function markRadius({ selected, hovered, spare }) {
+export function markRadius({ selected, hovered, spare, paired }) {
+  // Both halves of an approach are drawn at one size, whichever of them is
+  // selected and whatever either one is. An approach is a thing that happens
+  // between two objects, and a mark half again as wide as the one it is being
+  // measured against reads as the more important end of it. Which one is
+  // clicked is still there in the ring: two pixels for the selection, one for
+  // the highlight.
+  if (paired) return SAT_R_OPERATIONAL;
   if (selected) return SAT_R_SELECTED;
   if (hovered) return SAT_R_HOVER;
   return spare ? SAT_R_SPARE : SAT_R_OPERATIONAL;
@@ -215,13 +222,15 @@ function superSample() {
  *
  * @returns {{canvas: HTMLCanvasElement, scale: number, radius: number}}
  */
-export function markTexture({ color, spare = false, selected = false, ringed = false, hovered = false }) {
-  const key = `${color}|${spare}|${selected}|${ringed}|${hovered}`;
+export function markTexture({
+  color, spare = false, selected = false, ringed = false, hovered = false, paired = false,
+}) {
+  const key = `${color}|${spare}|${selected}|${ringed}|${hovered}|${paired}`;
   const cached = textures.get(key);
   if (cached) return cached;
 
   const scale = GLOBE_MARK_SCALE;
-  const r = markRadius({ selected, hovered, spare }) * scale;
+  const r = markRadius({ selected, hovered, spare, paired }) * scale;
   // Room for the knockout, the state ring and its stroke width.
   const pad = SAT_KNOCKOUT_PX * scale + 3;
   const size = Math.ceil((r + pad) * 2);

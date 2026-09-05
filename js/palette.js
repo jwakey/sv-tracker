@@ -44,7 +44,7 @@ export const MAP_COLORS = {
   terminatorLine: '#49a9f7',
 
   // Line between two satellites under conjunction screening, by how far apart they are.
-  conjunction: '#00962d',
+  conjunction: '#a674ff',
   conjunctionClose: '#eee350',
   conjunctionCrit: '#f52626',
 };
