@@ -30,6 +30,7 @@
 // one per pair.
 
 import { propagateEci, propagateSat, apsisRadiiKm } from './propagate.js';
+import { MAP_COLORS } from './palette.js';
 
 export const DEFAULT_COARSE_STEP_SEC = 60;
 
@@ -39,8 +40,22 @@ export const DEFAULT_COARSE_STEP_SEC = 60;
 // CLOSE is where two objects stop merely sharing a shell; CRITICAL is where the
 // miss distance has fallen to the order of the element error itself, and the
 // only honest reading is "too close to tell apart".
-export const CLOSE_APPROACH_KM = 25;
 export const CRITICAL_APPROACH_KM = 5;
+export const CLOSE_APPROACH_KM = 20;
+
+/**
+ * Colour for the range line between a paired satellites, by how far apart they
+ * are right now.
+ *
+ * Here rather than in each view: both draw this line, and a rule kept in two
+ * places is a rule that drifts. The bands read outward - red inside CLOSE,
+ * yellow from there to NEAR, and the resting colour beyond.
+ */
+export function conjunctionColor(rangeKm) {
+  if (rangeKm < CRITICAL_APPROACH_KM) return MAP_COLORS.conjunctionCrit;
+  if (rangeKm < CLOSE_APPROACH_KM) return MAP_COLORS.conjunctionClose;
+  return MAP_COLORS.conjunction;
+}
 
 // Golden-section constant: the fraction of an interval the two probes sit in
 // from each end.

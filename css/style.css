@@ -33,11 +33,11 @@
 
      Kept in the same green and amber families as the map, so a green chip in a
      panel and a green mark on the map mean the same thing. */
-  --ok: #35e88c;     /* "Operational" badge in the detail panel. 10.3:1 */
+  --ok: #00962d;     /* "Operational" badge in the detail panel. 10.3:1 */
   --live: #4dff9e;   /* "Live" clock indicator - the brightest chrome. 12.7:1 */
-  --warn: #d8a34d;   /* spares, stale elements, a scrubbed clock. 7.3:1 */
-  --track: #d9a8f7;  /* catalogue objects added for screening. 11.3:1 */
-  --alert: #ff6b6b;  /* a screened miss under 5 km. 7.6:1 */
+  --warn: #eee350;   /* spares, stale elements, a scrubbed clock. 7.3:1 */
+  --track: #a674ff;  /* catalogue objects added for screening. 6.6:1 */
+  --alert: #f52626;  /* a screened miss under 5 km. 7.6:1 */
 
   --ocean: #0e1215;
 
@@ -462,7 +462,7 @@ code {
 .badge.operational { color: var(--ok); border-color: #1d7a4a; }
 .badge.spare { color: var(--warn); border-color: #7a5f2c; }
 .badge.site { color: var(--text-dim); border-color: var(--border-strong); }
-.badge.tracked { color: var(--track); border-color: #6b3d85; }
+.badge.tracked { color: var(--track); border-color: var(--track); }
 
 /* Label left in sans, value right in monospace: the pair reads as a table
    without needing rules down the middle. */

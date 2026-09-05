@@ -31,8 +31,8 @@ export const UNASSIGNED_COLOR = '#98a3ac';
 // nor its spares, and they must not read as either. Violet is the one hue left
 // that nothing else on the map uses - green is operational, amber is spares,
 // blue is the terminator, white is selection - so an added object is obviously
-// not ours the moment it appears. 9.2:1 against the ocean.
-export const TRACKED_COLOR = '#d49bf5';
+// not ours the moment it appears. 5.9:1 against the ocean.
+export const TRACKED_COLOR = '#a674ff';
 
 const PLANE_GAP_THRESHOLD_DEG = 15;
 

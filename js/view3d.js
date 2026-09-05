@@ -19,12 +19,12 @@ import { satColor } from './classify.js';
 import {
   EARTH_RADIUS_KM, greatCircleArc, subsolarPoint, destination,
 } from './geo.js';
-import { CLOSE_APPROACH_KM } from './conjunction.js';
+import { conjunctionColor } from './conjunction.js';
 import { MAP_COLORS } from './palette.js';
 import { loadLand, renderBasemapTile } from './basemap.js';
 import {
   markTexture, siteTexture, labelSize, markRadius, labelOffsetAcross,
-  GLOBE_MARK_SCALE, SAT_KNOCKOUT_PX, LABEL_GAP_PX, LABEL_FAMILY, READOUT_FAMILY,
+  GLOBE_MARK_SCALE, SAT_KNOCKOUT_PX, LABEL_GAP_PX, LABEL_FAMILY, LABEL_WEIGHT,
 } from './symbology.js';
 
 const CESIUM_VERSION = '1.121';
@@ -363,7 +363,7 @@ export async function create3DView(container, handlers = {}) {
   // not hand the size back, but the offset that keeps the box off the line has
   // to know how wide it is - so it is measured here, with the same font.
   const labelMetrics = document.createElement('canvas').getContext('2d');
-  labelMetrics.font = `600 ${GLOBE_LABEL_PX}px ${READOUT_FAMILY}`;
+  labelMetrics.font = `${LABEL_WEIGHT} ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`;
   let pairLabelText = null;
   let pairLabelHalfW = 0;
 
@@ -514,7 +514,7 @@ export async function create3DView(container, handlers = {}) {
           label: {
             // The map shows the short code beside the square, not above it.
             text: site.short || site.name,
-            font: `500 ${SITE_LABEL_PX}px ${LABEL_FAMILY}`,
+            font: `${LABEL_WEIGHT} ${SITE_LABEL_PX}px ${LABEL_FAMILY}`,
             fillColor: Cesium.Color.fromCssColorString(MAP_COLORS.site),
             outlineColor: Cesium.Color.fromCssColorString('#000000').withAlpha(0.9),
             outlineWidth: 3,
@@ -616,7 +616,7 @@ export async function create3DView(container, handlers = {}) {
           },
           label: {
             text: sat.label,
-            font: `500 ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`,
+            font: `${LABEL_WEIGHT} ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`,
             // The satellite's own colour, exactly as the map draws it: a label
             // belongs to its mark, and reads as the mark's only if it matches.
             fillColor: color,
@@ -744,7 +744,7 @@ export async function create3DView(container, handlers = {}) {
       pairLabelEntity = viewer.entities.add({
         position: new Cesium.CallbackProperty(pairMidpoint, false),
         label: {
-          font: `600 ${GLOBE_LABEL_PX}px ${READOUT_FAMILY}`,
+          font: `${LABEL_WEIGHT} ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`,
           showBackground: true,
           backgroundColor: Cesium.Color.fromCssColorString(MAP_COLORS.labelBg),
           backgroundPadding: new Cesium.Cartesian2(PAIR_LABEL_PAD_X, PAIR_LABEL_PAD_Y),
@@ -771,9 +771,7 @@ export async function create3DView(container, handlers = {}) {
     pairEntity.show = Boolean(pair);
     pairLabelEntity.show = Boolean(pair);
     if (pair) {
-      const css = pair.rangeKm < CLOSE_APPROACH_KM
-        ? MAP_COLORS.conjunctionClose
-        : MAP_COLORS.conjunction;
+      const css = conjunctionColor(pair.rangeKm);
       // Only when the band actually changes. This runs five times a second and
       // a material is an allocation, where the colour holds for whole passes.
       if (pairEntity._pairColor !== css) {

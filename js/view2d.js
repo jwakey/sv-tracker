@@ -24,14 +24,14 @@ import {
   footprintRings, footprintOutline, splitAtAntimeridian, greatCircleArc,
   greatCircleMidpoint, angularSeparation, subsolarPoint, D2R, R2D,
 } from './geo.js';
-import { CLOSE_APPROACH_KM } from './conjunction.js';
+import { conjunctionColor } from './conjunction.js';
 import { satColor } from './classify.js';
 import { MAP_COLORS as COLORS } from './palette.js';
 import { loadLand } from './basemap.js';
 import {
   markScale, markRadius, drawMark, labelSize, labelOffsetAcross,
   SAT_KNOCKOUT_PX, SAT_R_OPERATIONAL, SAT_R_SPARE, SAT_R_SELECTED,
-  LABEL_GAP_PX, LABEL_FAMILY, READOUT_FAMILY, LABEL_OUTLINE,
+  LABEL_GAP_PX, LABEL_FAMILY, LABEL_WEIGHT, LABEL_OUTLINE,
   HEADING_GAP_PX, HEADING_LEN_PX, HEADING_HALF_PX,
 } from './symbology.js';
 
@@ -324,7 +324,7 @@ export function create2DView(container, handlers = {}) {
       a: [a.lat, a.lon],
       b: [b.lat, b.lon],
       rangeKm: pair.rangeKm,
-      close: pair.rangeKm < CLOSE_APPROACH_KM,
+      color: conjunctionColor(pair.rangeKm),
     };
   }
 
@@ -621,7 +621,7 @@ export function create2DView(container, handlers = {}) {
     if (!f.pair) return;
     const { ctx } = view;
 
-    ctx.strokeStyle = f.pair.close ? COLORS.conjunctionClose : COLORS.conjunction;
+    ctx.strokeStyle = f.pair.color;
     ctx.lineWidth = PAIR_LINE_WIDTH;
     ctx.setLineDash(PAIR_DASH);
     ctx.globalAlpha = 0.95;
@@ -665,11 +665,11 @@ export function create2DView(container, handlers = {}) {
 
     const km = f.pair.rangeKm;
     const text = `${km < 10 ? km.toFixed(2) : km.toFixed(1)} km`;
-    const color = f.pair.close ? COLORS.conjunctionClose : COLORS.conjunction;
+    const color = f.pair.color;
 
     const size = labelSize(markScale(view.zoom));
     const pad = size * 0.42;
-    ctx.font = `600 ${size.toFixed(1)}px ${READOUT_FAMILY}`;
+    ctx.font = `${LABEL_WEIGHT} ${size.toFixed(1)}px ${LABEL_FAMILY}`;
     ctx.textBaseline = 'middle';
 
     const boxW = ctx.measureText(text).width + pad * 2;
@@ -733,7 +733,7 @@ export function create2DView(container, handlers = {}) {
     const scale = markScale(view.zoom);
     const size = labelSize(scale);
 
-    ctx.font = `500 ${size.toFixed(1)}px ${LABEL_FAMILY}`;
+    ctx.font = `${LABEL_WEIGHT} ${size.toFixed(1)}px ${LABEL_FAMILY}`;
     ctx.textBaseline = 'middle';
     // Dark outline rather than a backing box: 80 filled rectangles would bury
     // the map. It thickens with the type, or large text ends up held worse
@@ -813,7 +813,7 @@ export function create2DView(container, handlers = {}) {
     const size = labelSize(scale) + 1;
     const pad = size * 0.4;
 
-    ctx.font = `${size.toFixed(1)}px ${LABEL_FAMILY}`;
+    ctx.font = `${LABEL_WEIGHT} ${size.toFixed(1)}px ${LABEL_FAMILY}`;
     const text = sat.label;
     const w = ctx.measureText(text).width;
     const reach = markRadius({ hovered: true }) * scale + (SAT_KNOCKOUT_PX + LABEL_GAP_PX) * scale;

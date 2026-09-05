@@ -36,30 +36,15 @@ export const MAP_COLORS = {
   site: '#e6ebef',
   selection: '#ffffff',
 
-  // Day/night is inverted from the usual terminator overlay. Shading the night
-  // side is the normal approach, but on a map this dark it is black on
-  // near-black, so the daylit half gets a faint neutral wash instead. Neutral,
-  // not warm: a tinted wash reads as an effect, and this is just lighting.
+  // Day/night colors
   day: 'rgba(226, 234, 242, 0.045)',
   sunGlow: 'rgba(226, 234, 242, 0.06)',
   sunGlowEdge: 'rgba(226, 234, 242, 0)',
   terminator: 'rgb(79, 163, 247)',
-
-  // The globe draws the day/night boundary as a line rather than relying on
-  // shading, so it needs a colour of its own. Cool blue: it belongs to the
-  // basemap's slate family, so it reads as lighting rather than data, and it
-  // cannot be mistaken for a green orbit, an amber link or a white selection.
   terminatorLine: '#49a9f7',
 
-  // A screened close approach: the line drawn between the pair and the range
-  // box sitting on it.
-  //
-  // Violet by default, matching the tracked object the line starts from - the
-  // pairing belongs to it, and a 400 km miss is not an event. It turns red once
-  // the two are actually close, which is the one hue nothing else on this map
-  // uses: green is the constellation, amber its spares, blue the terminator,
-  // white a selection. On a screening display red can only mean one thing, so
-  // it is worth keeping unspent until it does.
-  conjunction: '#d49bf5',
-  conjunctionClose: '#ff6b6b',
+  // Line between two satellites under conjunction screening, by how far apart they are.
+  conjunction: '#00962d',
+  conjunctionClose: '#eee350',
+  conjunctionCrit: '#f52626',
 };
