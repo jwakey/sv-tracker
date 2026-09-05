@@ -16,11 +16,14 @@
 //  - labels, footprints, selection and hover follow the map's rules.
 
 import { satColor } from './classify.js';
-import { EARTH_RADIUS_KM, greatCircleArc, subsolarPoint, destination } from './geo.js';
+import {
+  EARTH_RADIUS_KM, greatCircleArc, subsolarPoint, destination,
+} from './geo.js';
+import { CLOSE_APPROACH_KM } from './conjunction.js';
 import { MAP_COLORS } from './palette.js';
 import { loadLand, renderBasemapTile } from './basemap.js';
 import {
-  markTexture, siteTexture, labelSize, markRadius,
+  markTexture, siteTexture, labelSize, markRadius, labelOffsetAcross,
   GLOBE_MARK_SCALE, SAT_KNOCKOUT_PX, LABEL_GAP_PX, LABEL_FAMILY,
 } from './symbology.js';
 
@@ -59,6 +62,27 @@ const BASEMAP_MAX_LEVEL = 6;
 // Label size on the globe. The map scales its labels with zoom; the globe has
 // no zoom levels, so it sits at the size the map uses around its middle.
 const GLOBE_LABEL_PX = labelSize(GLOBE_MARK_SCALE);
+
+// Framing for a conjunction. Cesium's default field of view is 60 degrees, so
+// standing off by half the span over tan(30 deg) puts a given separation across
+// the view; the multiplier below folds in the margin that keeps the pair well
+// inside the frame rather than touching its edges.
+const PAIR_STANDOFF_RATIO = 3;
+// Floor and ceiling on that standoff. The floor is not about the marks - those
+// are billboards, sized in pixels however near the camera gets - it is about
+// keeping enough of the Earth under the pair to see where the approach happens.
+// Below this the view is all satellite and no context; above the ceiling a wide
+// miss pulls the camera back until the Earth is a marble again.
+const PAIR_STANDOFF_MIN_M = 40000;
+const PAIR_STANDOFF_MAX_M = 4000000;
+const PAIR_LINE_WIDTH = 2.5;
+const PAIR_DASH_PATTERN = 0b1110011100111001;
+// The range box: its own padding, and the clearance it keeps from the line it
+// measures. Plain numbers, not Cartesian2s - this module is evaluated before
+// Cesium is fetched.
+const PAIR_LABEL_PAD_X = 7;
+const PAIR_LABEL_PAD_Y = 5;
+const PAIR_LABEL_GAP_PX = 9;
 
 // The map sets site codes a shade smaller than satellite labels.
 const SITE_LABEL_PX = 10.5;
@@ -202,8 +226,13 @@ export async function create3DView(container, handlers = {}) {
   const pulseEntities = [];
   const planeRingEntities = new Map(); // plane index -> entity
   const headingEntities = [];
-  let trackEntity = null;
+  const trackEntities = [];
   let terminatorEntity = null;
+  let pairEntity = null;
+  let pairLabelEntity = null;
+  // The satellite the camera is currently pivoting about, if any. Held by id so
+  // the pivot can be released without caring whether the entity still exists.
+  let pivotEntityId = null;
 
   // Highlighted satellites and the point each is flying towards. Rebuilt every
   // render, read by the heading entities' CallbackProperties.
@@ -255,12 +284,13 @@ export async function create3DView(container, handlers = {}) {
     return ring._positions3d;
   };
 
-  const trackPositions = () => {
-    if (!current || !current.track || current.track.length < 2) return [];
+  const trackPositions = (i) => {
+    const track = current && current.tracks && current.tracks[i];
+    if (!track || track.points.length < 2) return [];
     // Each sample carries its altitude, so this traces the orbit itself, not
     // its shadow on the ground.
     return Cesium.Cartesian3.fromDegreesArrayHeights(
-      current.track.flatMap(([lat, lon, altKm]) => [lon, lat, altKm * 1000]),
+      track.points.flatMap(([lat, lon, altKm]) => [lon, lat, altKm * 1000]),
     );
   };
 
@@ -307,6 +337,88 @@ export async function create3DView(container, handlers = {}) {
   // depthTestAgainstTerrain globally would z-fight the footprints and site
   // markers sitting at ground level.
   const occluder = new Cesium.EllipsoidalOccluder(viewer.scene.globe.ellipsoid);
+  /** The two ends of the active conjunction, at the altitudes they fly. */
+  const pairEnds = () => {
+    const pair = current && current.conjunction;
+    if (!pair || pair.rangeKm === null || pair.rangeKm === undefined) return null;
+    const a = current.positions.get(pair.aId);
+    const b = current.positions.get(pair.bId);
+    return a && b ? { a, b, rangeKm: pair.rangeKm } : null;
+  };
+
+  const pairPositions = () => {
+    const ends = pairEnds();
+    if (!ends) return [];
+    return Cesium.Cartesian3.fromDegreesArrayHeights([
+      ends.a.lon, ends.a.lat, ends.a.altKm * 1000,
+      ends.b.lon, ends.b.lat, ends.b.altKm * 1000,
+    ]);
+  };
+
+  /**
+   * Midpoint of the line, for the range readout.
+   *
+   * Straight average of the two Cartesian positions rather than a spherical
+   * midpoint: over a separation of tens of kilometres the chord and the arc are
+   * the same to well under a pixel, and this is where the line itself is drawn.
+   */
+  const pairMidpoint = () => {
+    const points = pairPositions();
+    if (points.length < 2) return Cesium.Cartesian3.ZERO;
+    return Cesium.Cartesian3.midpoint(points[0], points[1], new Cesium.Cartesian3());
+  };
+
+  // Text metrics for the range box. Cesium lays a label out on the GPU and does
+  // not hand the size back, but the offset that keeps the box off the line has
+  // to know how wide it is - so it is measured here, with the same font.
+  const labelMetrics = document.createElement('canvas').getContext('2d');
+  labelMetrics.font = `600 ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`;
+  let pairLabelText = null;
+  let pairLabelHalfW = 0;
+
+  const scratchPairA = new Cesium.Cartesian3();
+  const scratchPairB = new Cesium.Cartesian3();
+  const scratchWinA = new Cesium.Cartesian2();
+  const scratchWinB = new Cesium.Cartesian2();
+
+  /**
+   * Offset that keeps the range box off the line, recomputed per frame.
+   *
+   * The line's direction on screen is not a property of the pair - it is a
+   * property of where the camera happens to be - so this has to project both
+   * ends into window coordinates every frame and take the perpendicular there.
+   * A fixed offset is what put the box on top of the line for any pair the
+   * camera happened to show end-on.
+   */
+  const pairLabelOffset = (time, result) => {
+    const out = result || new Cesium.Cartesian2();
+    const ends = pairEnds();
+
+    let dx = 0;
+    let dy = 0;
+    if (ends) {
+      Cesium.Cartesian3.fromDegrees(
+        ends.a.lon, ends.a.lat, ends.a.altKm * 1000, undefined, scratchPairA,
+      );
+      Cesium.Cartesian3.fromDegrees(
+        ends.b.lon, ends.b.lat, ends.b.altKm * 1000, undefined, scratchPairB,
+      );
+      const wa = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, scratchPairA, scratchWinA);
+      const wb = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, scratchPairB, scratchWinB);
+      // Undefined once an end is behind the camera. The zero direction below
+      // falls back to placing the box above, which is as good a guess as any
+      // when the line has no on-screen direction at all.
+      if (wa && wb) { dx = wb.x - wa.x; dy = wb.y - wa.y; }
+    }
+
+    const [ox, oy] = labelOffsetAcross(
+      dx, dy, pairLabelHalfW, GLOBE_LABEL_PX / 2 + PAIR_LABEL_PAD_Y, PAIR_LABEL_GAP_PX,
+    );
+    out.x = ox;
+    out.y = oy;
+    return out;
+  };
+
   const scratchCart = new Cesium.Cartesian3();
   let lastCameraPosition = null;
 
@@ -579,30 +691,118 @@ export async function create3DView(container, handlers = {}) {
       if (!liveSats.has(id)) entity.show = false;
     }
 
-    // Orbit path of the selected satellite, one revolution either side of now,
-    // at the altitude it flies. No seam handling needed in 3D.
-    if (!trackEntity) {
-      trackEntity = viewer.entities.add({
+    // The range line between a paired satellites, and its live readout.
+    //
+    // Straight through space, not draped on the ellipsoid: the pair are two
+    // objects at altitude and the quantity being drawn is the distance between
+    // them, which is a chord. ArcType.NONE is what keeps it one.
+    if (!pairEntity) {
+      pairEntity = viewer.entities.add({
         polyline: {
-          positions: new Cesium.CallbackProperty(trackPositions, false),
+          positions: new Cesium.CallbackProperty(pairPositions, false),
+          width: PAIR_LINE_WIDTH,
+          arcType: Cesium.ArcType.NONE,
+          material: new Cesium.PolylineDashMaterialProperty({
+            color: Cesium.Color.fromCssColorString(MAP_COLORS.conjunction),
+            dashPattern: PAIR_DASH_PATTERN,
+          }),
+        },
+      });
+      pairLabelEntity = viewer.entities.add({
+        position: new Cesium.CallbackProperty(pairMidpoint, false),
+        label: {
+          font: `600 ${GLOBE_LABEL_PX}px ${LABEL_FAMILY}`,
+          showBackground: true,
+          backgroundColor: Cesium.Color.fromCssColorString(MAP_COLORS.labelBg),
+          backgroundPadding: new Cesium.Cartesian2(PAIR_LABEL_PAD_X, PAIR_LABEL_PAD_Y),
+          // Centred on the offset, which carries it clear of the line - see
+          // pairLabelOffset(). Anchoring it to an edge instead would fight the
+          // offset, since which edge faces the line changes with the camera.
+          horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          pixelOffset: new Cesium.CallbackProperty(pairLabelOffset, false),
+          // The pair can be on the far side of the globe from the camera while
+          // the clock is scrubbed; the line and its box go with them rather
+          // than floating over the near face.
+          disableDepthTestDistance: 0,
+        },
+      });
+    }
+
+    // The pivot belonged to the approach. Once the pairing goes - because
+    // something else was picked, or the object was dropped - the camera comes
+    // back rather than staying locked to a satellite nobody is looking at.
+    if (!state.conjunction && pivotEntityId) releasePivot();
+
+    const pair = pairEnds();
+    pairEntity.show = Boolean(pair);
+    pairLabelEntity.show = Boolean(pair);
+    if (pair) {
+      const css = pair.rangeKm < CLOSE_APPROACH_KM
+        ? MAP_COLORS.conjunctionClose
+        : MAP_COLORS.conjunction;
+      // Only when the band actually changes. This runs five times a second and
+      // a material is an allocation, where the colour holds for whole passes.
+      if (pairEntity._pairColor !== css) {
+        pairEntity._pairColor = css;
+        const color = Cesium.Color.fromCssColorString(css);
+        pairEntity.polyline.material = new Cesium.PolylineDashMaterialProperty({
+          color, dashPattern: PAIR_DASH_PATTERN,
+        });
+        pairLabelEntity.label.fillColor = color;
+      }
+      const text = pair.rangeKm < 10
+        ? `${pair.rangeKm.toFixed(2)} km`
+        : `${pair.rangeKm.toFixed(1)} km`;
+      if (pairLabelText !== text) {
+        pairLabelText = text;
+        pairLabelEntity.label.text = text;
+        pairLabelHalfW = labelMetrics.measureText(text).width / 2 + PAIR_LABEL_PAD_X;
+      }
+    }
+
+    // Orbit paths, one revolution either side of now at the altitude each flies.
+    // No seam handling needed in 3D. A pool grown to fit, like the heading stubs
+    // and the link lines: with a conjunction up there are two of these, and the
+    // count changes as the selection does.
+    const tracks = state.tracks || [];
+    while (trackEntities.length < tracks.length) {
+      const i = trackEntities.length;
+      trackEntities.push(viewer.entities.add({
+        polyline: {
+          positions: new Cesium.CallbackProperty(() => trackPositions(i), false),
           width: 2,
           // NONE, not GEODESIC: geodesic arcs drape onto the ellipsoid,
           // which would flatten the orbit onto the surface.
           arcType: Cesium.ArcType.NONE,
           material: new Cesium.PolylineDashMaterialProperty({ color: Cesium.Color.WHITE }),
         },
-      });
+      }));
     }
-    trackEntity.show = Boolean(state.track && state.track.length > 1);
-    if (trackEntity.show) {
-      trackEntity.polyline.material = new Cesium.PolylineDashMaterialProperty({
-        color: Cesium.Color.fromCssColorString(state.trackColor || '#ffffff'),
-      });
-    }
+    trackEntities.forEach((entity, i) => {
+      const track = tracks[i];
+      entity.show = Boolean(track);
+      if (!track) return;
+      // Only when this slot changes colour - a material is an allocation and
+      // this runs five times a second.
+      if (entity._trackColor !== track.color) {
+        entity._trackColor = track.color;
+        entity.polyline.material = new Cesium.PolylineDashMaterialProperty({
+          color: Cesium.Color.fromCssColorString(track.color),
+        });
+      }
+    });
 
     // Direction stubs for the highlighted satellites.
+    //
+    // Not for catalogue objects. They are highlighted permanently - that is
+    // what makes one findable among eighty - so on the globe the stub is always
+    // there, and a fixed-length line running off a mark reads as another orbit
+    // rather than as a direction. The map keeps its arrowhead, which is a glyph
+    // on the mark and does not have that problem.
     headings = [];
     for (const sat of state.sats) {
+      if (sat.tracked) continue;
       const pos = state.positions.get(sat.id);
       if (!pos || !pos.ahead || !state.isHighlighted(sat)) continue;
       headings.push({ id: sat.id, pos, color: satColor(sat, state.planes) });
@@ -688,10 +888,82 @@ export async function create3DView(container, handlers = {}) {
 
   function focusSat(pos) {
     if (!pos) return;
+    // Any deliberate camera move releases the pivot first, or Cesium's tracking
+    // would keep re-centring on the old target and fight the flight.
+    releasePivot();
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, 14000000),
       duration: 1.2,
     });
+  }
+
+  /** Hand the camera back, if we were the ones holding it. */
+  function releasePivot() {
+    if (!pivotEntityId) return;
+    pivotEntityId = null;
+    viewer.trackedEntity = undefined;
+  }
+
+  /**
+   * Frame a conjunction: down onto the midpoint, from a standoff worked out
+   * from how far apart the two actually are.
+   *
+   * Not a fixed altitude like focusSat's. Approaches span three orders of
+   * magnitude, and the camera has to end up close enough that a few kilometres
+   * is a visible gap without flying so close for a wide miss that both objects
+   * leave the frame.
+   */
+  function focusConjunction(target, other, targetId) {
+    // The true separation, straight from the inertial positions. The ground arc
+    // between the two sub-points would understate a pair separated mostly by
+    // altitude - one passing directly over the other - and fly the camera in
+    // far too close.
+    const sepM = Math.hypot(
+      target.eci.x - other.eci.x,
+      target.eci.y - other.eci.y,
+      target.eci.z - other.eci.z,
+    ) * 1000;
+
+    const standoff = Math.min(
+      PAIR_STANDOFF_MAX_M,
+      Math.max(PAIR_STANDOFF_MIN_M, sepM * PAIR_STANDOFF_RATIO),
+    );
+
+    const entity = satEntities.get(targetId);
+    if (!entity) {
+      // No entity yet - the first render has not run. Fall back to flying to
+      // the position, which at least puts the approach on screen.
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(
+          target.lon, target.lat, target.altKm * 1000 + standoff,
+        ),
+        duration: 1.6,
+      });
+      return;
+    }
+
+    // Hand the camera to Cesium's entity tracking, with the tracked object as
+    // the pivot. This is what makes the object the centre of the view rather
+    // than something that happens to be in it: drag and the camera orbits the
+    // satellite instead of the globe, zoom and it closes on the satellite, and
+    // if the clock is started again the camera follows it round rather than
+    // watching it leave.
+    //
+    // viewFrom is the offset the camera takes up in the target's east-north-up
+    // frame, and setting it is not optional: without one Cesium falls back to
+    // the entity's bounding sphere, and a billboard's is a couple of metres
+    // across, so the camera ends up inside the mark.
+    //
+    // Forty-five degrees, not overhead. Two satellites can miss each other
+    // horizontally or by altitude, and a near-nadir view collapses the second
+    // case completely - one passes directly under the other and the two marks
+    // land on the same pixel, which is exactly the geometry the polar
+    // approaches have. An oblique view has no degenerate direction: it shows
+    // about seven tenths of a separation whichever way it points.
+    const oblique = standoff * Math.SQRT1_2;
+    entity.viewFrom = new Cesium.Cartesian3(0, -oblique, oblique);
+    pivotEntityId = targetId;
+    viewer.trackedEntity = entity;
   }
 
   return {
@@ -699,6 +971,7 @@ export async function create3DView(container, handlers = {}) {
     viewer,
     render,
     focusSat,
+    focusConjunction,
     invalidateSize: () => viewer.resize(),
     destroy: () => {
       clickHandler.destroy();

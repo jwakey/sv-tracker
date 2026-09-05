@@ -33,6 +33,15 @@ import { propagateEci, propagateSat, apsisRadiiKm } from './propagate.js';
 
 export const DEFAULT_COARSE_STEP_SEC = 60;
 
+// Distance bands, shared by the sidebar's ranking and the line the map draws
+// between a paired satellites. They are distance, nothing more: a TLE cannot
+// support a probability of collision, so neither number is a risk threshold.
+// CLOSE is where two objects stop merely sharing a shell; CRITICAL is where the
+// miss distance has fallen to the order of the element error itself, and the
+// only honest reading is "too close to tell apart".
+export const CLOSE_APPROACH_KM = 25;
+export const CRITICAL_APPROACH_KM = 5;
+
 // Golden-section constant: the fraction of an interval the two probes sit in
 // from each end.
 const INV_PHI = (Math.sqrt(5) - 1) / 2;
@@ -53,10 +62,7 @@ const APSIS_MARGIN_KM = 50;
 // that the clock does not visibly stutter while a screening runs.
 const CANDIDATES_PER_YIELD = 4;
 
-export const ACCURACY_NOTE = 'Screening only. Public elements are good to '
-  + 'roughly a kilometre at epoch and degrade by a few kilometres a day, so a '
-  + 'miss distance under about 5 km says these two objects pass close, not how '
-  + 'close. Operational avoidance uses owner ephemerides and covariances.';
+export const ACCURACY_NOTE = 'Screening only. Not meant for decision making.';
 
 function rangeKm(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);

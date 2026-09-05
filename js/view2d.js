@@ -22,13 +22,14 @@
 
 import {
   footprintRings, footprintOutline, splitAtAntimeridian, greatCircleArc,
-  subsolarPoint, D2R, R2D,
+  greatCircleMidpoint, angularSeparation, subsolarPoint, D2R, R2D,
 } from './geo.js';
+import { CLOSE_APPROACH_KM } from './conjunction.js';
 import { satColor } from './classify.js';
 import { MAP_COLORS as COLORS } from './palette.js';
 import { loadLand } from './basemap.js';
 import {
-  markScale, markRadius, drawMark, labelSize,
+  markScale, markRadius, drawMark, labelSize, labelOffsetAcross,
   SAT_KNOCKOUT_PX, SAT_R_OPERATIONAL, SAT_R_SPARE, SAT_R_SELECTED,
   LABEL_GAP_PX, LABEL_FAMILY, LABEL_OUTLINE,
   HEADING_GAP_PX, HEADING_LEN_PX, HEADING_HALF_PX,
@@ -82,13 +83,36 @@ const WHEEL_LINE_PX = 16;
 // and crosses the map in a couple of steps.
 const TERMINATOR_STEP_DEG = 1;
 
+// Framing for a conjunction. The pair are placed to span this fraction of the
+// shorter side of the pane: enough that they are unmistakably two marks with a
+// line between them, not so much that the line runs out of the window and the
+// label has nowhere to sit.
+const PAIR_SPAN_FRACTION = 0.3;
+// Never zoom out to frame a pair. A wide miss is better shown tight and off the
+// edge than by pulling back to a view where neither mark is legible.
+const PAIR_MIN_ZOOM = 4;
+
+// Range line and its label.
+const PAIR_LINE_WIDTH = 1.6;
+const PAIR_DASH = [5, 4];
+// Clearance the range box keeps from the line it measures. Not the whole
+// offset: labelOffsetAcross() adds the box's own half-size on each axis, so
+// this is the gap that actually shows.
+const PAIR_LABEL_GAP_PX = 8;
+
 export function create2DView(container, handlers = {}) {
   const map = L.map(container, {
     crs: L.CRS.EPSG4326,
     center: [15, 0],
     zoom: 1,
     minZoom: 0,
-    maxZoom: 7,
+    // Raised from 7 for conjunction framing. A close approach is tens of
+    // kilometres, and at zoom 7 a 5 km separation is eight pixels - the two
+    // marks land on top of each other and there is nothing to look at. There is
+    // no tile pyramid to run out of here: the basemap is Natural Earth vectors
+    // drawn on canvas, so the extra levels cost nothing but coarser coastlines,
+    // and the marks stop growing at zoom 6.8 anyway (MARK_SCALE_MAX).
+    maxZoom: 11,
     worldCopyJump: false,
     maxBounds: WORLD_BOUNDS,
     // Soft rubber-band. Higher fights zoom-to-cursor near the edges, where the
@@ -256,16 +280,46 @@ export function create2DView(container, handlers = {}) {
       }
     }
 
-    const track = st.track && st.track.length > 1 ? splitAtAntimeridian(st.track) : [];
+    const trackPaths = (st.tracks || [])
+      .map((t) => ({ color: t.color, segments: splitAtAntimeridian(t.points).map(boundPath) }))
+      .filter((t) => t.segments.length);
 
     return {
       footprints,
       dots,
       planePaths,
       linkSegments: linkSegments.map(boundPath),
-      trackSegments: track.map(boundPath),
-      trackColor: st.trackColor || '#dfe4e8',
+      trackPaths,
       showNames: st.opts.showSatNames,
+      pair: buildPair(st),
+    };
+  }
+
+  /**
+   * The two ends of the active conjunction, as a path on the ground.
+   *
+   * A great-circle arc rather than a straight line between the two pixels: near
+   * a pole - which is where Iridium approaches happen - two satellites twenty
+   * kilometres apart can sit a hundred and eighty degrees of longitude apart on
+   * an equirectangular map. Drawn straight, the line would cross the entire
+   * world the wrong way round. The arc goes over the pole, which is where the
+   * pair actually are.
+   */
+  function buildPair(st) {
+    const pair = st.conjunction;
+    if (!pair) return null;
+    const a = st.positions.get(pair.aId);
+    const b = st.positions.get(pair.bId);
+    if (!a || !b || pair.rangeKm === null || pair.rangeKm === undefined) return null;
+
+    const arc = greatCircleArc(a.lat, a.lon, b.lat, b.lon, 24);
+    return {
+      segments: splitAtAntimeridian(arc).map(boundPath),
+      mid: greatCircleMidpoint(a.lat, a.lon, b.lat, b.lon),
+      a: [a.lat, a.lon],
+      b: [b.lat, b.lon],
+      rangeKm: pair.rangeKm,
+      close: pair.rangeKm < CLOSE_APPROACH_KM,
     };
   }
 
@@ -305,8 +359,13 @@ export function create2DView(container, handlers = {}) {
     const { ctx, proj } = view;
 
     clipToWorld(ctx, proj);
+    // Under the marks, over everything else: the line joins two satellites, so
+    // it must not be buried by a footprint, and must not cover the very marks
+    // it is joining. Its label goes on last, over both.
+    drawPairLine(view, frame);
     drawSatellites(view, frame);
     drawSatLabels(view, frame);
+    drawPairLabel(view, frame);
     ctx.restore();
 
     drawHoverLabel(view, frame);
@@ -479,12 +538,16 @@ export function create2DView(container, handlers = {}) {
 
   function drawGroundTrack(view, f) {
     const { ctx } = view;
-    if (!f.trackSegments.length) return;
-    ctx.strokeStyle = f.trackColor;
+    if (!f.trackPaths.length) return;
     ctx.lineWidth = 1.4;
     ctx.globalAlpha = 0.85;
     ctx.setLineDash([4, 4]);
-    if (tracePaths(view, f.trackSegments, false)) ctx.stroke();
+    // Each track in its own satellite's colour, so a pair of them reads as two
+    // orbits rather than one crossing itself.
+    for (const track of f.trackPaths) {
+      ctx.strokeStyle = track.color;
+      if (tracePaths(view, track.segments, false)) ctx.stroke();
+    }
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
   }
@@ -546,6 +609,90 @@ export function create2DView(container, handlers = {}) {
     ctx.stroke();
     ctx.fillStyle = dot.color;
     ctx.fill();
+  }
+
+  /** The range line joining a paired satellites. */
+  function drawPairLine(view, f) {
+    if (!f.pair) return;
+    const { ctx } = view;
+
+    ctx.strokeStyle = f.pair.close ? COLORS.conjunctionClose : COLORS.conjunction;
+    ctx.lineWidth = PAIR_LINE_WIDTH;
+    ctx.setLineDash(PAIR_DASH);
+    ctx.globalAlpha = 0.95;
+    if (tracePaths(view, f.pair.segments, false)) ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * The live separation, in a box on the line.
+   *
+   * Offset perpendicular to the line rather than sitting on the midpoint: at
+   * the distances that matter the two marks are almost touching, and a box
+   * centred between them would cover both. The offset is in pixels and the
+   * perpendicular is taken in screen space, so the box stands clear of the line
+   * whichever way it runs.
+   */
+  function drawPairLabel(view, f) {
+    if (!f.pair) return;
+    const { ctx, proj } = view;
+    const [midLat, midLon] = f.pair.mid;
+
+    // greatCircleMidpoint normalises its longitude, so this is already the copy
+    // the line was drawn on. Off the canvas it is skipped outright: the box is
+    // one readout, and there is nothing to gain from clamping it to an edge
+    // where it would point at a line that is not there.
+    const mx = proj.x(midLon);
+    const my = proj.y(midLat);
+    if (!onCanvas(mx, my, view)) return;
+
+    // Screen-space direction of the line, from the two ends. The far end is
+    // brought back alongside the near one first: a pair straddling the seam has
+    // longitudes 358 degrees apart, and taken raw the direction would run the
+    // long way round the map and throw the box out sideways.
+    let lonB = f.pair.b[1];
+    if (lonB - f.pair.a[1] > 180) lonB -= 360;
+    if (lonB - f.pair.a[1] < -180) lonB += 360;
+
+    const dx = proj.x(lonB) - proj.x(f.pair.a[1]);
+    const dy = proj.y(f.pair.b[0]) - proj.y(f.pair.a[0]);
+
+    const km = f.pair.rangeKm;
+    const text = `${km < 10 ? km.toFixed(2) : km.toFixed(1)} km`;
+    const color = f.pair.close ? COLORS.conjunctionClose : COLORS.conjunction;
+
+    const size = labelSize(markScale(view.zoom));
+    const pad = size * 0.42;
+    ctx.font = `600 ${size.toFixed(1)}px ${LABEL_FAMILY}`;
+    ctx.textBaseline = 'middle';
+
+    const boxW = ctx.measureText(text).width + pad * 2;
+    const boxH = size + pad;
+    const [ox, oy] = labelOffsetAcross(dx, dy, boxW / 2, boxH / 2, PAIR_LABEL_GAP_PX);
+    const cx = mx + ox;
+    const cy = my + oy;
+
+    // The stem first, so the box is what covers its inner end. Drawing it
+    // afterwards would mean working out where the box boundary falls along a
+    // direction that changes with the pair.
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mx, my);
+    ctx.lineTo(cx, cy);
+    ctx.stroke();
+
+    // A filled box, not the outline the name labels use: this is one readout
+    // rather than eighty, and it has to hold over a track, a footprint or the
+    // daylit half without being read as another satellite's name.
+    ctx.fillStyle = COLORS.labelBg;
+    ctx.fillRect(cx - boxW / 2, cy - boxH / 2, boxW, boxH);
+    ctx.strokeRect(cx - boxW / 2 - 0.5, cy - boxH / 2 - 0.5, boxW + 1, boxH + 1);
+
+    ctx.fillStyle = color;
+    ctx.fillText(text, cx - boxW / 2 + pad, cy);
+    ctx.textBaseline = 'alphabetic';
   }
 
   function drawSatellites(view, f) {
@@ -759,6 +906,43 @@ export function create2DView(container, handlers = {}) {
       const target = L.latLng(pos.lat, pos.lon);
       if (map.getBounds().contains(target)) return;
       map.setView(target, map.getZoom(), { animate: false });
+    },
+
+    /**
+     * Frame a conjunction: centre between the two and zoom until they read as
+     * two marks with a measurable gap.
+     *
+     * The zoom comes from the separation rather than being a fixed level.
+     * Approaches run from a couple of kilometres to a few hundred, three orders
+     * of magnitude, and one level cannot serve both - it would either put the
+     * pair off opposite edges or leave them a single pixel apart.
+     *
+     * EPSG:4326 makes that arithmetic direct: Leaflet's scale is 256 * 2^zoom
+     * pixels for 180 degrees, so the zoom that puts a given angle across a
+     * given number of pixels is one logarithm.
+     */
+    focusConjunction(target, other) {
+      const sepDeg = angularSeparation(target.lat, target.lon, other.lat, other.lon) * R2D;
+
+      const size = map.getSize();
+      const spanPx = Math.min(size.x, size.y) * PAIR_SPAN_FRACTION;
+
+      // A coincident pair - the two projected onto the same point - has no
+      // separation to frame, so it just goes to the closest zoom there is.
+      const zoom = sepDeg > 1e-7
+        ? Math.log2((spanPx / sepDeg) * (180 / 256))
+        : map.getMaxZoom();
+
+      // Centred on the tracked object, not between the two. It is the subject,
+      // and putting it in the middle is what lets the map be panned and zoomed
+      // around it afterwards without it wandering off. The separation still
+      // sets the zoom, so the constellation member stays in frame - at the
+      // fraction below it lands well inside the shorter half-axis.
+      map.setView(
+        L.latLng(target.lat, target.lon),
+        Math.min(map.getMaxZoom(), Math.max(PAIR_MIN_ZOOM, zoom)),
+        { animate: true, duration: 0.8 },
+      );
     },
     invalidateSize: () => map.invalidateSize(),
     destroy: () => {

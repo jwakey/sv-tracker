@@ -67,6 +67,58 @@ export function markRadius({ selected, hovered, spare }) {
   return spare ? SAT_R_SPARE : SAT_R_OPERATIONAL;
 }
 
+/**
+ * Where to put a label that measures a line, so it does not sit on it.
+ *
+ * Takes the line's direction in screen space and returns a pixel offset from
+ * its midpoint, across the line rather than along it. Screen y runs downward in
+ * both a canvas context and Cesium's window coordinates, so one function serves
+ * the map and the globe alike.
+ *
+ * How far it has to go is the box's own reach in that direction. For an
+ * axis-aligned rectangle that is `halfW*|nx| + halfH*|ny|` - the support
+ * function - which is the furthest any part of the box, corners included,
+ * projects along n. Pushing the centre that far plus `gap` puts the whole box
+ * clear by `gap` at every angle.
+ *
+ * The two obvious shortcuts both fail. A flat offset clears a horizontal line
+ * and leaves a vertical one running through the middle of a box sixty pixels
+ * wide. Scaling each axis by its own half-extent fixes those two orientations
+ * and still lets a corner cut the line at forty-five degrees, where the corner
+ * reaches half again as far as either edge.
+ *
+ * Which side it lands on is simply the left of the line's own direction, taken
+ * as it comes. Preferring a side - always above, say, or always to the right -
+ * needs a rule to choose between the two perpendiculars, and any such rule has
+ * to change its mind somewhere: the box then jumps bodily across the line as
+ * the pair rotates through whatever orientation the rule turns on. Since the
+ * two ends are always given in the same order, tracked object first, taking the
+ * perpendicular as it comes is both stable and continuous, and never snaps.
+ *
+ * @param {number} dx screen-space run of the line
+ * @param {number} dy screen-space rise of the line, positive downward
+ * @param {number} halfW half the label box width, in pixels
+ * @param {number} halfH half the label box height, in pixels
+ * @param {number} gap clearance to leave between box and line
+ * @returns {[number, number]} pixel offset from the midpoint
+ */
+export function labelOffsetAcross(dx, dy, halfW, halfH, gap) {
+  const len = Math.hypot(dx, dy);
+
+  // A degenerate line - both ends on one pixel, which is where a very close
+  // approach ends up - has no direction to cross, so the label goes above.
+  let nx = 0;
+  let ny = -1;
+
+  if (len > 1e-6) {
+    nx = -dy / len;
+    ny = dx / len;
+  }
+
+  const reach = halfW * Math.abs(nx) + halfH * Math.abs(ny) + gap;
+  return [nx * reach, ny * reach];
+}
+
 /** Label size for a given mark scale, clamped at both ends. */
 export function labelSize(scale) {
   return Math.min(LABEL_MAX_PX, Math.max(LABEL_MIN_PX, LABEL_BASE_PX * scale));

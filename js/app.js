@@ -46,15 +46,29 @@ const state = {
   // conjunction, so the pair reads as a pair while the clock sits at the time
   // of closest approach.
   highlightIds: new Set(),
-  track: null,
-  trackColor: '#dfe4e8',
+  // The approach currently being looked at, or null. Both views draw a line
+  // between the two and label it with `rangeKm`, which is recomputed every tick
+  // rather than frozen at the screened miss distance - so scrubbing the clock
+  // runs the range down to the closest point and back out again, which is the
+  // whole reason the display can be taken off real time.
+  conjunction: null,   // { aId, bId, tcaMs, missKm, rangeKm }
+  // Ground tracks to draw, one per satellite that has earned one. A list
+  // rather than the single track this used to carry: an approach is two orbits
+  // and where they cross, and one of them is half the picture.
+  tracks: [],   // [{ id, points: [[lat, lon, altKm]], color }]
   selectedSatId: null,
   selectedSiteName: null,
   tle: { fetchedAt: null, source: null },
   opts: {
     showOperational: true,
     showSpares: true,
-    showFootprints: true,
+    // Off to start with. Sixty-six overlapping discs is the loudest thing the
+    // map can draw, and it buries the coastlines, the plane rings and any
+    // tracked object underneath them - so the constellation opens legible and
+    // coverage is switched on when it is what you came to look at. Kept in step
+    // with the checkbox in index.html, which is what sets the control's initial
+    // state: nothing syncs state to the inputs on load.
+    showFootprints: false,
     showVisLines: true,
     showPlaneLinks: true,
     showSatNames: true,
@@ -120,20 +134,31 @@ let activeView = null;
 let ui;
 let lastFrameMs = performance.now();
 
-// Picking anything by hand ends the conjunction pairing: the two rings meant
-// "these two are about to pass", and that is no longer what the display shows.
+/**
+ * Drop the conjunction pairing: the two rings and the line between them.
+ *
+ * Called whenever something is picked by hand. The pairing meant "these two are
+ * about to pass"; once the user has gone looking at something else that is no
+ * longer what the display is showing, and a line left behind between two marks
+ * would be claiming a relationship nobody asked about.
+ */
+function clearPairing() {
+  state.highlightIds.clear();
+  state.conjunction = null;
+}
+
 const handlers = {
   onSelectSat: (id) => {
     state.selectedSatId = id; state.selectedSiteName = null;
-    state.highlightIds.clear(); refreshDerived();
+    clearPairing(); refreshDerived();
   },
   onSelectSite: (name) => {
     state.selectedSiteName = name; state.selectedSatId = null;
-    state.highlightIds.clear(); refreshDerived();
+    clearPairing(); refreshDerived();
   },
   onClearSelection: () => {
     state.selectedSatId = null; state.selectedSiteName = null;
-    state.highlightIds.clear(); refreshDerived();
+    clearPairing(); refreshDerived();
   },
 };
 
@@ -246,6 +271,24 @@ function computePositions(date) {
   }
 
   computeTrackedNearest();
+  computeConjunctionRange();
+}
+
+/**
+ * The live separation of a paired satellites, for the line drawn between them.
+ *
+ * Null while either is unpropagated, which the views take as "draw nothing"
+ * rather than as zero.
+ */
+function computeConjunctionRange() {
+  const pair = state.conjunction;
+  if (!pair) return;
+
+  const a = state.positions.get(pair.aId);
+  const b = state.positions.get(pair.bId);
+  pair.rangeKm = a && b
+    ? Math.hypot(a.eci.x - b.eci.x, a.eci.y - b.eci.y, a.eci.z - b.eci.z)
+    : null;
 }
 
 /**
@@ -314,15 +357,36 @@ function computePlaneRings(date) {
   }
 }
 
-/** Orbit track for the selected satellite, or null if nothing is selected. */
-function computeTrack(date) {
-  const sat = state.selectedSatId && state.sats.find((s) => s.id === state.selectedSatId);
-  if (!sat) {
-    state.track = null;
-    return;
+/**
+ * Orbit tracks: the selection, and both halves of an active conjunction.
+ *
+ * A Set because the two overlap - arriving at an approach selects the
+ * constellation member, which is already one of the pair - and drawing the same
+ * orbit twice would double its opacity for no reason.
+ *
+ * Each track is a full revolution either side of now at a 20 second step, so
+ * this is a few hundred propagations per satellite per tick. That is why it is
+ * confined to satellites someone is actually looking at rather than run for the
+ * whole constellation.
+ */
+function computeTracks(date) {
+  state.tracks = [];
+
+  const wanted = new Set();
+  if (state.selectedSatId) wanted.add(state.selectedSatId);
+  if (state.conjunction) {
+    wanted.add(state.conjunction.aId);
+    wanted.add(state.conjunction.bId);
   }
-  state.track = groundTrack(sat.satrec, date, 20);
-  state.trackColor = satColor(sat, state.planes);
+
+  for (const id of wanted) {
+    const sat = state.sats.find((s) => s.id === id);
+    if (!sat) continue;
+    const points = groundTrack(sat.satrec, date, 20);
+    if (points.length > 1) {
+      state.tracks.push({ id, points, color: satColor(sat, state.planes) });
+    }
+  }
 }
 
 function tick() {
@@ -338,7 +402,7 @@ function tick() {
   state.time.current = new Date(state.time.simMs);
   computePositions(state.time.current);
   computePlaneRings(state.time.current);
-  computeTrack(state.time.current);
+  computeTracks(state.time.current);
 
   if (activeView) activeView.render(state);
   ui.renderClock();
@@ -370,7 +434,7 @@ function redraw() {
 function refreshDerived() {
   computePositions(state.time.current);
   computePlaneRings(state.time.current);
-  computeTrack(state.time.current);
+  computeTracks(state.time.current);
   if (activeView) activeView.render(state);
   ui.renderDetail();
   ui.renderTracked();
@@ -468,6 +532,29 @@ async function runScreening(targetId) {
   }
 }
 
+/**
+ * Point the active view at the paired satellites, or at the selection if there
+ * is no pair.
+ *
+ * Separate from gotoConjunction() because switching between the map and the
+ * globe has to do the same thing: the new view opens on its default framing and
+ * would otherwise show the whole world with the approach an invisible speck
+ * somewhere on it.
+ */
+function focusPair() {
+  if (!activeView) return;
+
+  const pair = state.conjunction;
+  const a = pair && state.positions.get(pair.aId);
+  const b = pair && state.positions.get(pair.bId);
+  // The tracked object is the subject, so it is what the camera settles on and
+  // pivots about - the constellation member is what it is being compared
+  // against. Its id goes too: the globe needs the entity, not just a position,
+  // to hand the camera something to orbit.
+  if (a && b) activeView.focusConjunction(a, b, pair.aId);
+  else if (state.selectedSatId) activeView.focusSat(state.positions.get(state.selectedSatId));
+}
+
 // -------------------------------------------------------------- view switch
 
 async function setView(kind) {
@@ -500,6 +587,9 @@ async function setView(kind) {
   activeView = views[kind];
   activeView.invalidateSize();
   activeView.render(state);
+  // A view opened on a conjunction inherits its framing, not the world view it
+  // would otherwise start at.
+  if (state.conjunction) focusPair();
 }
 
 // -------------------------------------------------------------------- start
@@ -571,7 +661,7 @@ async function main() {
 
       state.selectedSatId = obj.id;
       state.selectedSiteName = null;
-      state.highlightIds.clear();
+      clearPairing();
       refreshDerived();
       if (activeView) activeView.focusSat(state.positions.get(obj.id));
       return { ok: true, sat: obj };
@@ -580,6 +670,7 @@ async function main() {
     removeTracked: (id) => {
       state.tracked = state.tracked.filter((s) => s.id !== id);
       syncSatList();
+      if (state.conjunction && state.conjunction.aId === id) clearPairing();
       state.highlightIds.delete(id);
       if (state.selectedSatId === id) state.selectedSatId = null;
       // A result set belongs to the object it was run against, so it goes with
@@ -601,12 +692,21 @@ async function main() {
 
     /**
      * Take the display to a close approach: the clock to the moment itself,
-     * both objects picked out, and the constellation member selected so its
-     * detail panel is up.
+     * both objects picked out and joined by a range line, the constellation
+     * member selected so its detail panel is up, and the camera taken in far
+     * enough that two objects a few tens of kilometres apart are two objects
+     * rather than one dot.
+     *
+     * The clock stops. At 1x a 14 km/s crossing is gone in seconds, and the
+     * whole point of arriving here is to sit at the closest point and then
+     * scrub either side of it by hand.
      */
     gotoConjunction: (event) => {
       const target = state.tracked.find((s) => s.id === state.screening.targetId);
       state.highlightIds = new Set(target ? [target.id, event.satId] : [event.satId]);
+      state.conjunction = target
+        ? { aId: target.id, bId: event.satId, tcaMs: event.tcaMs, missKm: event.missKm, rangeKm: null }
+        : null;
       state.selectedSatId = event.satId;
       state.selectedSiteName = null;
       state.time.playing = false;
@@ -614,7 +714,7 @@ async function main() {
       state.time.current = new Date(event.tcaMs);
       refreshDerived();
       ui.renderClock();
-      if (activeView) activeView.focusSat(state.positions.get(event.satId));
+      focusPair();
     },
 
     selectSat: (id) => {
@@ -623,7 +723,7 @@ async function main() {
       revealSat(sat);
       state.selectedSatId = id;
       state.selectedSiteName = null;
-      state.highlightIds.clear();
+      clearPairing();
       refreshDerived();
       if (activeView) activeView.focusSat(state.positions.get(id));
     },

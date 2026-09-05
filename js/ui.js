@@ -5,7 +5,7 @@ import { footprintAngularRadius, EARTH_RADIUS_KM } from './geo.js';
 import { periodMinutes, epochDate } from './propagate.js';
 import { formatAge } from './tle.js';
 import { MIN_QUERY_LENGTH } from './catalog.js';
-import { ACCURACY_NOTE } from './conjunction.js';
+import { ACCURACY_NOTE, CLOSE_APPROACH_KM, CRITICAL_APPROACH_KM } from './conjunction.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -70,8 +70,8 @@ const CATALOG_DEBOUNCE_MS = 400;
 
 /** Distance bands for a screened approach. Colour only, no claim of risk. */
 function missBand(km) {
-  if (km < 5) return 'critical';
-  if (km < 25) return 'close';
+  if (km < CRITICAL_APPROACH_KM) return 'critical';
+  if (km < CLOSE_APPROACH_KM) return 'close';
   return 'nominal';
 }
 
@@ -493,7 +493,8 @@ export function initUI(state, on) {
       el.screenNote.hidden = false;
       el.screenNote.className = 'hint';
       el.screenNote.textContent = 'Finds every close approach between this object and the '
-        + 'constellation over the window, to the second.';
+        + 'constellation over the window, to the second. Click a result to stop the clock at '
+        + 'that moment and take both views in onto the pair.';
       return;
     }
 

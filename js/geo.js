@@ -248,6 +248,27 @@ export function splitAtAntimeridian(points) {
  * Great-circle arc between two points, sampled as [lat, lon] with normalised
  * longitudes. Run it through splitAtAntimeridian() before drawing.
  */
+/**
+ * Angle subtended at Earth's centre by two surface points, in radians.
+ *
+ * The haversine form, so it keeps its precision for the very short separations
+ * a close approach produces - the plain cosine rule loses most of its
+ * significant figures below a degree or so.
+ */
+export function angularSeparation(lat1, lon1, lat2, lon2) {
+  const p1 = lat1 * D2R;
+  const p2 = lat2 * D2R;
+  return 2 * Math.asin(Math.min(1, Math.sqrt(
+    Math.sin((p2 - p1) / 2) ** 2
+    + Math.cos(p1) * Math.cos(p2) * Math.sin(((lon2 - lon1) * D2R) / 2) ** 2,
+  )));
+}
+
+/** The point halfway along the great circle between two points. */
+export function greatCircleMidpoint(lat1, lon1, lat2, lon2) {
+  return greatCircleArc(lat1, lon1, lat2, lon2, 2)[1];
+}
+
 export function greatCircleArc(lat1, lon1, lat2, lon2, steps = 48) {
   const p1 = [lat1 * D2R, lon1 * D2R];
   const p2 = [lat2 * D2R, lon2 * D2R];
