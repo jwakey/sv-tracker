@@ -457,7 +457,13 @@ export async function create3DView(container, handlers = {}) {
     }
     terminatorEntity.show = state.opts.dayNight;
 
+    // Entities persist until told otherwise, and the satellite list is no
+    // longer fixed for the session - a tracked object can be dropped. Anything
+    // the pass below does not touch is hidden after it.
+    const liveSats = new Set();
+
     for (const sat of state.sats) {
+      liveSats.add(sat.id);
       const pos = state.positions.get(sat.id);
       const shown = state.isVisible(sat) && pos;
       let entity = satEntities.get(sat.id);
@@ -529,7 +535,8 @@ export async function create3DView(container, handlers = {}) {
       entity.label.fillColor = color;
       entity.label.pixelOffset = new Cesium.Cartesian2(labelOffset(spare, selected), 0);
 
-      const wantFootprint = state.opts.showFootprints || highlighted;
+      // Suppressed for catalogue objects, as on the map - see buildFrame().
+      const wantFootprint = (state.opts.showFootprints || highlighted) && !sat.noFootprint;
       if (wantFootprint) {
         const radiusM = pos.gammaRad * EARTH_RADIUS_KM * 1000;
         const surface = Cesium.Cartesian3.fromDegrees(pos.lon, pos.lat, 0);
@@ -563,6 +570,13 @@ export async function create3DView(container, handlers = {}) {
       } else if (footprint) {
         footprint.show = false;
       }
+    }
+
+    for (const [id, entity] of satEntities) {
+      if (!liveSats.has(id)) entity.show = false;
+    }
+    for (const [id, entity] of footprintEntities) {
+      if (!liveSats.has(id)) entity.show = false;
     }
 
     // Orbit path of the selected satellite, one revolution either side of now,

@@ -9,6 +9,8 @@ import { footprintAngularRadius } from './geo.js';
 import { create2DView } from './view2d.js';
 import { create3DView } from './view3d.js';
 import { initUI } from './ui.js';
+import { searchCatalog, toTracked, fetchByCatalogNumber } from './catalog.js';
+import { screenConjunctions } from './conjunction.js';
 
 const TICK_MS = 200;
 const MAX_OFFSET_MS = 24 * 60 * 60 * 1000;
@@ -17,14 +19,33 @@ const MAX_OFFSET_MS = 24 * 60 * 60 * 1000;
 // just has to be long enough for the two points to differ cleanly.
 const LEAD_SEC = 90;
 
+// A screening window has to end inside the reach of the scrubber, or a result
+// could name a time the display cannot be taken to. A minute of slack absorbs
+// the wall-clock drift between running the screening and clicking the result.
+const MAX_SCREEN_WINDOW_MS = MAX_OFFSET_MS - 60 * 1000;
+
 const state = {
+  // sats is the drawing set and is derived: the constellation, then whatever
+  // has been added from the catalogue. Everything downstream - both views, the
+  // per-tick propagation, picking - reads this one array and does not care
+  // which half a satellite came from. syncSatList() rebuilds it.
   sats: [],
+  iridium: [],
+  tracked: [],
   planes: [],
   sites: [],
   positions: new Map(),
   visibility: new Map(), // site name -> [{sat, elDeg, rangeKm}], best pass first
   visLinks: [],
   planeRings: [],
+  // Tracked object id -> the constellation member it is nearest right now.
+  // Recomputed every tick from positions already in hand, so the detail panel
+  // has a live range without a screening run behind it.
+  trackedNearest: new Map(),
+  // Satellites picked out without being selected - both halves of a
+  // conjunction, so the pair reads as a pair while the clock sits at the time
+  // of closest approach.
+  highlightIds: new Set(),
   track: null,
   trackColor: '#dfe4e8',
   selectedSatId: null,
@@ -46,9 +67,23 @@ const state = {
   },
   time: { simMs: Date.now(), rate: 1, playing: true, current: new Date() },
 
+  screening: {
+    running: false,
+    progress: 0,
+    targetId: null,      // which tracked object the result belongs to
+    result: null,
+    error: null,
+    windowHours: 12,
+    thresholdKm: 100,
+  },
+
   /** Whether the display filters currently allow this satellite. */
   isVisible(sat) {
     if (sat.status === 'hidden') return false;
+    // Tracked objects answer to no display filter. They are on the map because
+    // someone put them there, and the constellation's filters have nothing to
+    // say about an object outside the constellation.
+    if (sat.tracked) return true;
     if (sat.status === 'spare') return this.opts.showSpares;
     if (!this.opts.showOperational) return false;
     if (!sat.plane) return true;
@@ -66,19 +101,40 @@ const state = {
    */
   isHighlighted(sat) {
     if (this.selectedSatId === sat.id) return true;
+    if (this.highlightIds.has(sat.id)) return true;
+    // Always, for a tracked object: it is one violet dot among eighty, and the
+    // ring and direction arrow are what make it findable. It carries no
+    // footprint, so this costs nothing on the map.
+    if (sat.tracked) return true;
     return this.opts.highlightSpares && sat.status === 'spare' && this.isVisible(sat);
   },
 };
+
+/** Rebuild the drawing set from the constellation and the tracked objects. */
+function syncSatList() {
+  state.sats = state.iridium.concat(state.tracked);
+}
 
 const views = { '2d': null, '3d': null };
 let activeView = null;
 let ui;
 let lastFrameMs = performance.now();
 
+// Picking anything by hand ends the conjunction pairing: the two rings meant
+// "these two are about to pass", and that is no longer what the display shows.
 const handlers = {
-  onSelectSat: (id) => { state.selectedSatId = id; state.selectedSiteName = null; refreshDerived(); },
-  onSelectSite: (name) => { state.selectedSiteName = name; state.selectedSatId = null; refreshDerived(); },
-  onClearSelection: () => { state.selectedSatId = null; state.selectedSiteName = null; refreshDerived(); },
+  onSelectSat: (id) => {
+    state.selectedSatId = id; state.selectedSiteName = null;
+    state.highlightIds.clear(); refreshDerived();
+  },
+  onSelectSite: (name) => {
+    state.selectedSiteName = name; state.selectedSatId = null;
+    state.highlightIds.clear(); refreshDerived();
+  },
+  onClearSelection: () => {
+    state.selectedSatId = null; state.selectedSiteName = null;
+    state.highlightIds.clear(); refreshDerived();
+  },
 };
 
 // ---------------------------------------------------------------- data load
@@ -97,10 +153,34 @@ async function loadConstellation({ force = false } = {}) {
   classifyStatus(sats, overrides, roster);
   const planes = assignPlanes(sats);
 
-  state.sats = sats;
+  state.iridium = sats;
   state.planes = planes;
   state.sites = sites;
   state.tle = { fetchedAt: tle.fetchedAt, source: tle.source };
+  syncSatList();
+}
+
+/**
+ * Re-fetch the elements for every tracked object.
+ *
+ * Runs with the constellation refresh, because a screening is only as current
+ * as its stalest half: refreshing the Iridium elements and leaving a week-old
+ * catalogue object in place would quietly make the miss distances worse, not
+ * better. One query per object, and anything that fails keeps what it has.
+ */
+async function refreshTracked() {
+  if (!state.tracked.length) return;
+
+  await Promise.all(state.tracked.map(async (obj) => {
+    try {
+      const fresh = await fetchByCatalogNumber(obj.id);
+      if (!fresh) return;
+      Object.assign(obj, toTracked(fresh));
+    } catch (err) {
+      console.warn(`Could not refresh elements for ${obj.name}:`, err);
+    }
+  }));
+  syncSatList();
 }
 
 async function fetchJSON(url, fallback) {
@@ -141,6 +221,10 @@ function computePositions(date) {
     const entries = [];
 
     for (const sat of state.sats) {
+      // Ground-site visibility is a constellation question - which Iridium can
+      // this station work - so a tracked object passing overhead does not
+      // belong in the list even though it is on the map.
+      if (sat.tracked) continue;
       const pos = state.positions.get(sat.id);
       if (!pos || !state.isVisible(sat)) continue;
       const look = lookAngles(gd, pos.ecf);
@@ -159,6 +243,37 @@ function computePositions(date) {
 
     entries.sort((a, b) => b.elDeg - a.elDeg);
     state.visibility.set(site.name, entries);
+  }
+
+  computeTrackedNearest();
+}
+
+/**
+ * For each tracked object, the constellation member it is closest to right now.
+ *
+ * Straight from the inertial positions the tick has already computed, so it is
+ * 66-odd distance calculations per tracked object and no propagation at all.
+ * This is the live half of the feature: scrub the clock and the range updates
+ * under you. The screening below is the other half, and finds the minima this
+ * would only stumble on.
+ */
+function computeTrackedNearest() {
+  state.trackedNearest.clear();
+  if (!state.tracked.length) return;
+
+  for (const obj of state.tracked) {
+    const a = state.positions.get(obj.id);
+    if (!a) continue;
+
+    let best = null;
+    for (const sat of state.iridium) {
+      if (sat.status === 'hidden') continue;
+      const b = state.positions.get(sat.id);
+      if (!b) continue;
+      const d = Math.hypot(a.eci.x - b.eci.x, a.eci.y - b.eci.y, a.eci.z - b.eci.z);
+      if (!best || d < best.rangeKm) best = { sat, rangeKm: d };
+    }
+    if (best) state.trackedNearest.set(obj.id, best);
   }
 }
 
@@ -243,13 +358,23 @@ function redraw() {
   if (activeView) activeView.render(state);
 }
 
-/** Recompute and repaint now, outside the regular tick. */
+/**
+ * Recompute and repaint now, outside the regular tick.
+ *
+ * Everything that changes the selection or the tracked set settles here, so the
+ * sidebar's tracked list and screening panel are rebuilt here too - otherwise
+ * clicking a tracked mark on the map would select it without the panel that
+ * screens it noticing. Both are a few rows of DOM and only run on discrete
+ * interactions, never on the 5 Hz tick.
+ */
 function refreshDerived() {
   computePositions(state.time.current);
   computePlaneRings(state.time.current);
   computeTrack(state.time.current);
   if (activeView) activeView.render(state);
   ui.renderDetail();
+  ui.renderTracked();
+  ui.renderScreening();
 }
 
 /**
@@ -277,6 +402,69 @@ function revealSat(sat) {
   if (changed) {
     ui.syncOptionInputs();
     ui.renderLegend();
+  }
+}
+
+// ------------------------------------------------------- conjunction screening
+
+let screenAbort = null;
+
+function clearScreening() {
+  state.screening.result = null;
+  state.screening.error = null;
+  state.screening.targetId = null;
+  state.screening.progress = 0;
+}
+
+/**
+ * Screen one tracked object against the constellation and hand the result to
+ * the panel.
+ *
+ * The window is capped to what the scrubber can reach, so every time of closest
+ * approach the panel offers is a time the display can actually be taken to.
+ * Screening starts from real now rather than simulated time: a result that
+ * moved every time the clock was scrubbed would be unreadable.
+ */
+async function runScreening(targetId) {
+  const target = state.tracked.find((s) => s.id === targetId);
+  if (!target || state.screening.running) return;
+
+  if (screenAbort) screenAbort.abort();
+  screenAbort = new AbortController();
+
+  clearScreening();
+  state.screening.running = true;
+  state.screening.targetId = targetId;
+  ui.renderScreening();
+
+  const windowMs = Math.min(state.screening.windowHours * 3600 * 1000, MAX_SCREEN_WINDOW_MS);
+
+  try {
+    const result = await screenConjunctions({
+      target,
+      others: state.iridium.filter((s) => s.status !== 'hidden'),
+      start: new Date(),
+      windowMs,
+      thresholdKm: state.screening.thresholdKm,
+      signal: screenAbort.signal,
+      onProgress: (fraction) => {
+        state.screening.progress = fraction;
+        ui.renderScreening();
+      },
+    });
+    state.screening.result = result;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      clearScreening();
+    } else {
+      console.error(err);
+      state.screening.error = err.message;
+    }
+  } finally {
+    state.screening.running = false;
+    screenAbort = null;
+    ui.renderScreening();
+    ui.renderDetail();
   }
 }
 
@@ -322,6 +510,7 @@ async function main() {
       ui.setLoading(true, 'Fetching latest elements…');
       try {
         await loadConstellation({ force: true });
+        await refreshTracked();
         ui.renderStatus();
         ui.renderLegend();
         refreshDerived();
@@ -367,12 +556,74 @@ async function main() {
       refreshDerived();
     },
     clearSelection: handlers.onClearSelection,
+
+    // ------------------------------------------------- catalogue and screening
+
+    searchCatalog: (query, options) => searchCatalog(query, options),
+
+    /** Put a catalogue object on the map, and select it. */
+    addTracked: (record) => {
+      if (state.sats.some((s) => s.id === record.id)) return { ok: false, reason: 'already' };
+
+      const obj = toTracked(record);
+      state.tracked.push(obj);
+      syncSatList();
+
+      state.selectedSatId = obj.id;
+      state.selectedSiteName = null;
+      state.highlightIds.clear();
+      refreshDerived();
+      if (activeView) activeView.focusSat(state.positions.get(obj.id));
+      return { ok: true, sat: obj };
+    },
+
+    removeTracked: (id) => {
+      state.tracked = state.tracked.filter((s) => s.id !== id);
+      syncSatList();
+      state.highlightIds.delete(id);
+      if (state.selectedSatId === id) state.selectedSatId = null;
+      // A result set belongs to the object it was run against, so it goes with
+      // it rather than being left to look like it describes something else.
+      if (state.screening.targetId === id) clearScreening();
+      refreshDerived();
+    },
+
+    setScreenOpt: (key, value) => {
+      state.screening[key] = value;
+      // The result was computed under the old window or threshold, so it is no
+      // longer an answer to the question the panel is now asking.
+      clearScreening();
+      ui.renderScreening();
+    },
+
+    runScreening: (targetId) => runScreening(targetId),
+    cancelScreening: () => { if (screenAbort) screenAbort.abort(); },
+
+    /**
+     * Take the display to a close approach: the clock to the moment itself,
+     * both objects picked out, and the constellation member selected so its
+     * detail panel is up.
+     */
+    gotoConjunction: (event) => {
+      const target = state.tracked.find((s) => s.id === state.screening.targetId);
+      state.highlightIds = new Set(target ? [target.id, event.satId] : [event.satId]);
+      state.selectedSatId = event.satId;
+      state.selectedSiteName = null;
+      state.time.playing = false;
+      state.time.simMs = event.tcaMs;
+      state.time.current = new Date(event.tcaMs);
+      refreshDerived();
+      ui.renderClock();
+      if (activeView) activeView.focusSat(state.positions.get(event.satId));
+    },
+
     selectSat: (id) => {
       const sat = state.sats.find((s) => s.id === id);
       if (!sat) return;
       revealSat(sat);
       state.selectedSatId = id;
       state.selectedSiteName = null;
+      state.highlightIds.clear();
       refreshDerived();
       if (activeView) activeView.focusSat(state.positions.get(id));
     },

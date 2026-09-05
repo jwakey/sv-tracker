@@ -36,6 +36,8 @@
   --ok: #35e88c;     /* "Operational" badge in the detail panel. 10.3:1 */
   --live: #4dff9e;   /* "Live" clock indicator - the brightest chrome. 12.7:1 */
   --warn: #d8a34d;   /* spares, stale elements, a scrubbed clock. 7.3:1 */
+  --track: #d9a8f7;  /* catalogue objects added for screening. 11.3:1 */
+  --alert: #ff6b6b;  /* a screened miss under 5 km. 7.6:1 */
 
   --ocean: #0e1215;
 
@@ -314,13 +316,116 @@ code {
 .search-results .result-name { flex: 1; color: var(--text); font-family: var(--mono); }
 .search-results .result-meta { font-size: 11px; color: var(--text-faint); }
 .search-results .result-meta.spare { color: var(--warn); }
+.search-results .result-meta.tracked { color: var(--track); }
 
 .search-empty { font-size: 11.5px; color: var(--text-faint); padding: 5px; }
+.search-empty.bad { color: var(--warn); }
 
 .search-hint kbd {
   font-family: var(--mono); font-size: 10.5px;
   background: var(--bg-input); border: 1px solid var(--border-strong);
   border-radius: 2px; padding: 0 4px; margin: 0 1px; color: var(--text-dim);
+}
+
+/* ---------- tracked objects and close-approach screening ---------- */
+
+/* Violet throughout, matching TRACKED_COLOR on the map: a catalogue object is
+   the one thing here that did not come from the roster, and the colour is what
+   says so in the sidebar, on the map and in the detail panel alike. */
+
+.tracked-list { margin-top: 4px; }
+
+.tracked-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 5px; margin: 0 -5px; border-radius: 2px;
+}
+.tracked-row:hover { background: var(--bg-raised); }
+.tracked-row.selected { background: var(--bg-raised); box-shadow: inset 2px 0 0 var(--track); }
+
+/* A button, not a span: selecting the object is an action, and it should be
+   reachable by keyboard like every other control in the panel. */
+.tracked-name {
+  flex: 1; min-width: 0; text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font: inherit; font-size: 12.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tracked-name:hover { color: var(--track); }
+
+.tracked-drop {
+  flex: none; background: none; border: 0; cursor: pointer;
+  color: var(--text-faint); font-size: 15px; line-height: 1;
+  padding: 0 3px; border-radius: 2px; font-family: var(--ui);
+}
+.tracked-drop:hover { color: var(--warn); background: var(--bg-hover); }
+
+/* Progress and the run summary share one element, so the panel does not shift
+   as a screening finishes. */
+.screen-status {
+  font-size: 11px; color: var(--text-faint); font-family: var(--mono);
+  margin: -4px 0 9px; line-height: 1.5;
+}
+.screen-status.bad { color: var(--warn); }
+
+.screen-progress {
+  display: block; height: 3px; margin-bottom: 5px;
+  background: var(--bg-hover); border: 1px solid var(--border); border-radius: 2px;
+  overflow: hidden;
+}
+.screen-progress i { display: block; height: 100%; background: var(--accent); }
+
+.screen-results { list-style: none; margin: 0; padding: 0; }
+
+/* Miss distance is the number being scanned for, so it gets its own column and
+   the largest type in the row; who and when hang off it. The whole row is the
+   click target - it takes the display to the approach. */
+.screen-row {
+  display: grid; gap: 0 9px;
+  grid-template-columns: auto 1fr;
+  grid-template-areas: "miss who" "miss when" "miss rel";
+  align-items: center;
+  padding: 6px 5px; margin: 0 -5px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer; border-radius: 2px;
+}
+.screen-row:hover { background: var(--bg-raised); }
+.screen-row:last-child { border-bottom: 0; }
+
+.screen-miss {
+  grid-area: miss; align-self: center;
+  font-family: var(--mono); font-size: 15px; font-weight: 500;
+  font-variant-numeric: tabular-nums; color: var(--text);
+  min-width: 62px; text-align: right;
+}
+.screen-miss em {
+  font-style: normal; font-size: 10px; font-weight: 400;
+  color: var(--text-faint); margin-left: 2px;
+}
+
+/* The bands are distance, not risk: a TLE cannot support a probability of
+   collision, so nothing here is labelled "warning" or "conjunction". */
+.screen-row.close .screen-miss { color: var(--warn); }
+.screen-row.critical .screen-miss { color: var(--alert); }
+
+/* The nearest approach shown when nothing met the threshold. Dimmed, so it does
+   not read as a hit. */
+.screen-row.fallback { opacity: 0.72; }
+
+.screen-who {
+  grid-area: who; font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.screen-count {
+  font-style: normal; font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-faint); margin-left: 5px;
+}
+.screen-when {
+  grid-area: when; font-size: 11px; color: var(--text-dim);
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.screen-rel {
+  grid-area: rel; font-size: 10.5px; color: var(--text-faint);
+  font-family: var(--mono);
 }
 
 /* ---------- detail panel ---------- */
@@ -357,6 +462,7 @@ code {
 .badge.operational { color: var(--ok); border-color: #1d7a4a; }
 .badge.spare { color: var(--warn); border-color: #7a5f2c; }
 .badge.site { color: var(--text-dim); border-color: var(--border-strong); }
+.badge.tracked { color: var(--track); border-color: #6b3d85; }
 
 /* Label left in sans, value right in monospace: the pair reads as a table
    without needing rules down the middle. */

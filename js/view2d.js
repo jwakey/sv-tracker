@@ -213,7 +213,10 @@ export function create2DView(container, handlers = {}) {
       const highlighted = st.isHighlighted(sat);
       const color = satColor(sat, st.planes);
 
-      if (st.opts.showFootprints || highlighted) {
+      // noFootprint is set on catalogue objects: the coverage disc is a comms
+      // figure and they are not comms assets, and one drawn at an arbitrary
+      // altitude can cover a hemisphere.
+      if ((st.opts.showFootprints || highlighted) && !sat.noFootprint) {
         const rings = footprintRings(pos.lat, pos.lon, pos.gammaRad).map(boundPath);
         // Only a highlighted footprint is stroked, so only it needs the real
         // boundary worked out separately from the filled rings.

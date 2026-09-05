@@ -139,3 +139,32 @@ export function groundTrack(satrec, date, stepSec = 20) {
   }
   return points;
 }
+
+/**
+ * ECI position and velocity only, in km and km/s.
+ *
+ * Conjunction screening propagates tens of thousands of times per run and
+ * needs nothing but the inertial vector, so this skips the gstime call and the
+ * geodetic/ECF conversions that make up most of the cost of propagateSat().
+ *
+ * @returns {{r: {x,y,z}, v: {x,y,z}} | null} null if SGP4 did not converge
+ */
+export function propagateEci(satrec, date) {
+  const pv = satellite.propagate(satrec, date);
+  if (!pv || !pv.position || !pv.velocity || !Number.isFinite(pv.position.x)) return null;
+  return { r: pv.position, v: pv.velocity };
+}
+
+/**
+ * Perigee and apogee radii from the mean elements, in km from Earth's centre.
+ *
+ * Used to throw out pairs whose orbits never reach the same altitude, before
+ * anything is propagated. Mean elements, so these are a shell the osculating
+ * orbit wanders either side of by a few km - callers add their own margin.
+ */
+export function apsisRadiiKm(satrec) {
+  const nRadPerSec = satrec.no / 60;
+  const a = (MU / (nRadPerSec * nRadPerSec)) ** (1 / 3);
+  const e = satrec.ecco;
+  return { perigeeKm: a * (1 - e), apogeeKm: a * (1 + e), semiMajorKm: a };
+}

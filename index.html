@@ -115,6 +115,49 @@
       <p id="jump-hint" class="hint">Or <em>HH:MM</em> alone for a time on the current UTC day.</p>
     </section>
 
+    <!-- Catalogue objects and close-approach screening. The search here goes
+         to CelesTrak rather than the loaded constellation, so it reaches
+         anything on orbit; whatever is added is screened against Iridium by
+         js/conjunction.js. -->
+    <section class="panel">
+      <h2>Track an object</h2>
+      <input id="catalog-search" class="search-input" type="search" autocomplete="off" spellcheck="false"
+             placeholder="CelesTrak: name or NORAD ID" aria-label="Search the CelesTrak catalogue">
+      <ul id="catalog-results" class="search-results" role="listbox"></ul>
+      <p id="catalog-hint" class="hint">Searches the whole catalogue. Three characters
+        minimum; a bare number is read as a NORAD ID.</p>
+
+      <div id="tracked-list" class="tracked-list"></div>
+    </section>
+
+    <section class="panel" id="screen-panel" hidden>
+      <h2>Close approach</h2>
+      <label class="field">
+        <span>Screen <em id="screen-target">&mdash;</em></span>
+        <select id="screen-window">
+          <option value="1">next 1 h</option>
+          <option value="6">next 6 h</option>
+          <option value="12" selected>next 12 h</option>
+          <option value="24">next 24 h</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Report approaches within</span>
+        <select id="screen-threshold">
+          <option value="25">25 km</option>
+          <option value="100" selected>100 km</option>
+          <option value="500">500 km</option>
+          <option value="2000">2000 km</option>
+        </select>
+      </label>
+      <div class="row">
+        <button id="screen-btn" class="ghost-btn wide">Screen against Iridium</button>
+      </div>
+      <div id="screen-status" class="screen-status" hidden></div>
+      <ol id="screen-results" class="screen-results"></ol>
+      <p id="screen-note" class="hint" hidden></p>
+    </section>
+
   </aside>
 
   <!-- Map stage. Both views are created on demand and stacked here; only the

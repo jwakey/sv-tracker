@@ -26,6 +26,13 @@ export const PLANE_COLOR = '#ffffffd7';
 // on the end of its own line.
 export const SPARE_COLOR = '#d9a441';
 export const UNASSIGNED_COLOR = '#98a3ac';
+// Objects pulled in from the wider CelesTrak catalogue for conjunction
+// screening. A fourth identity was needed: they are neither the constellation
+// nor its spares, and they must not read as either. Violet is the one hue left
+// that nothing else on the map uses - green is operational, amber is spares,
+// blue is the terminator, white is selection - so an added object is obviously
+// not ours the moment it appears. 9.2:1 against the ocean.
+export const TRACKED_COLOR = '#d49bf5';
 
 const PLANE_GAP_THRESHOLD_DEG = 15;
 
@@ -213,8 +220,9 @@ function planesFromRaanClustering(sats) {
     });
 }
 
-/** Mark colour: plane colour, spare amber, or grey if unassigned. */
+/** Mark colour: tracked violet, spare amber, plane colour, or grey if unassigned. */
 export function satColor(sat, planes) {
+  if (sat.tracked) return TRACKED_COLOR;
   if (sat.status === 'spare') return SPARE_COLOR;
   if (sat.plane) {
     const plane = planes.find((p) => p.index === sat.plane);
